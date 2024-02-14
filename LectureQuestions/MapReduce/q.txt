@@ -1,0 +1,1 @@
+What's the most concise (not necessarily readable) way to do this crawler exercise?

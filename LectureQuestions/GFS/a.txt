@@ -1,0 +1,1 @@
+Suppose a client reads a chunk and caches its location. Then, the chunk goes down, and a separate client writes to the replicas of the chunk. Then, the now-stale chunk comes back up, and the original client reads from the same location. 

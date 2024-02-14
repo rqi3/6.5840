@@ -1,0 +1,2 @@
+For record appends, if a record append fails, the data could still be appended in the replicas, or it could be in none of the replicas? This seems highly undesirable. If in none, the client is supposed to retry, but what if they just don’t? After record appends, each replica’s file length is different?
+
