@@ -28,16 +28,16 @@ type RequestTaskArgs struct {
 }
 
 type RequestTaskReply struct {
-	task_type string //either "map", "reduce", "nothing"
-	job_index int
-	nReduce int
-	input_filenames []string
+	Task_type string //either "map", "reduce", "nothing"
+	Job_index int
+	NReduce int
+	Input_filenames []string
 }
 
 type CompleteTaskArgs struct {
-	task_type string
-	job_index int
-	output_filenames []string
+	Task_type string
+	Job_index int
+	Output_filenames []string
 }
 
 type CompleteTaskReply struct {

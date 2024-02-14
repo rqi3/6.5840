@@ -61,16 +61,16 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 		}
 
 		if map_task_index == -1{
-			reply.task_type = "nothing"
-			reply.nReduce = c.nReduce
-			reply.job_index = -1
-			reply.input_filenames = nil
+			reply.Task_type = "nothing"
+			reply.NReduce = c.nReduce
+			reply.Job_index = -1
+			reply.Input_filenames = nil
 		} else {
 			c.map_task_statuses[map_task_index].time_assigned = time.Now()
-			reply.nReduce = c.nReduce
-			reply.task_type = "map"
-			reply.job_index = map_task_index
-			reply.input_filenames = []string{c.input_filenames[map_task_index]}
+			reply.NReduce = c.nReduce
+			reply.Task_type = "map"
+			reply.Job_index = map_task_index
+			reply.Input_filenames = []string{c.input_filenames[map_task_index]}
 		}
 	} else {
 		//Assign a reduce task or nothing
@@ -83,21 +83,21 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 		}
 
 		if reduce_task_index == -1{
-			reply.task_type = "nothing"
-			reply.nReduce = c.nReduce
-			reply.job_index = -1
-			reply.input_filenames = nil
+			reply.Task_type = "nothing"
+			reply.NReduce = c.nReduce
+			reply.Job_index = -1
+			reply.Input_filenames = nil
 		} else {
 			c.reduce_task_statuses[reduce_task_index].time_assigned = time.Now()
-			reply.task_type = "reduce"
-			reply.nReduce = c.nReduce
-			reply.job_index = reduce_task_index
+			reply.Task_type = "reduce"
+			reply.NReduce = c.nReduce
+			reply.Job_index = reduce_task_index
 			//input filenames are map_task_statuses[i].result[reduce_task_index]
 			input_filenames := make([]string, 0)
 			for _, status := range c.map_task_statuses{
 				input_filenames = append(input_filenames, status.result[reduce_task_index])
 			}
-			reply.input_filenames = input_filenames
+			reply.Input_filenames = input_filenames
 		}
 	}
 
@@ -108,15 +108,15 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 	c.coordinator_lock.Lock()
 	defer c.coordinator_lock.Unlock()
 
-	if args.task_type != "map" && args.task_type != "reduce"{
+	if args.Task_type != "map" && args.Task_type != "reduce"{
 		log.Fatal("CompleteTask: Invalid task type")
 	}
-	job_index := args.job_index
+	job_index := args.Job_index
 
-	if args.task_type == "map"{
-		c.map_task_statuses[job_index].result = args.output_filenames
-	} else if args.task_type == "reduce"{
-		c.reduce_task_statuses[job_index].result = args.output_filenames[0]
+	if args.Task_type == "map"{
+		c.map_task_statuses[job_index].result = args.Output_filenames
+	} else if args.Task_type == "reduce"{
+		c.reduce_task_statuses[job_index].result = args.Output_filenames[0]
 	}
 
 	return nil

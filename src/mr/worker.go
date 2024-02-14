@@ -76,7 +76,7 @@ func worker_map(mapf func(string, string) []KeyValue, job_index int, nReduce int
 		os.Rename(temp_file.Name(), intermediate_filename)
 		intermediate_filenames[i] = intermediate_filename
 	}
-	call("Coordinator.CompleteTask", &CompleteTaskArgs{task_type: "map", job_index: job_index, output_filenames: intermediate_filenames}, &CompleteTaskReply{})
+	call("Coordinator.CompleteTask", &CompleteTaskArgs{Task_type: "map", Job_index: job_index, Output_filenames: intermediate_filenames}, &CompleteTaskReply{})
 }
 
 func worker_reduce(reducef func(string, []string) string, job_index int, filenames []string){
@@ -123,7 +123,7 @@ func worker_reduce(reducef func(string, []string) string, job_index int, filenam
 	
 	output_filename := fmt.Sprintf("mr-out-%d", job_index)
 	os.Rename(temp_file.Name(), output_filename)
-	call("Coordinator.CompleteTask", &CompleteTaskArgs{task_type: "reduce", job_index: job_index, output_filenames: []string{output_filename}}, &CompleteTaskReply{})
+	call("Coordinator.CompleteTask", &CompleteTaskArgs{Task_type: "reduce", Job_index: job_index, Output_filenames: []string{output_filename}}, &CompleteTaskReply{})
 }
 
 //
@@ -141,22 +141,22 @@ func Worker(mapf func(string, string) []KeyValue,
 		request_args := RequestTaskArgs{}
 		request_reply := RequestTaskReply{}
 		request_ok := call("Coordinator.RequestTask", &request_args, &request_reply)
-		if !request_ok || request_reply.task_type == "nothing"{
+		if !request_ok || request_reply.Task_type == "nothing"{
 			time.Sleep(wait_time)
 			continue
 		}
 
-		if request_reply.task_type != "map" && request_reply.task_type != "reduce"{
+		if request_reply.Task_type != "map" && request_reply.Task_type != "reduce"{
 			log.Fatal("Worker: Invalid task type")
 		}
 		
-		if request_reply.task_type == "map"{
-			if len(request_reply.input_filenames) != 1{
+		if request_reply.Task_type == "map"{
+			if len(request_reply.Input_filenames) != 1{
 				log.Fatal("Worker: Invalid MAP input filenames")
 			}
-			worker_map(mapf, request_reply.job_index, request_reply.nReduce, request_reply.input_filenames[0])
-		} else if request_reply.task_type == "reduce"{
-			worker_reduce(reducef, request_reply.job_index, request_reply.input_filenames)
+			worker_map(mapf, request_reply.Job_index, request_reply.NReduce, request_reply.Input_filenames[0])
+		} else if request_reply.Task_type == "reduce"{
+			worker_reduce(reducef, request_reply.Job_index, request_reply.Input_filenames)
 		}
 		time.Sleep(wait_time)
 		continue
