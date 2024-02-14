@@ -4,7 +4,11 @@ import "fmt"
 import "log"
 import "net/rpc"
 import "hash/fnv"
-
+import "os"
+import "io/ioutil"
+import "encoding/json"
+import "sort"
+import "time"
 
 //
 // Map functions return a slice of KeyValue.
@@ -13,6 +17,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -45,7 +57,7 @@ func worker_map(mapf func(string, string) []KeyValue, job_index int, nReduce int
 	}
 
 	//write to intermediate files
-	intermediate_filenames = make([]string, nReduce)
+	intermediate_filenames := make([]string, nReduce)
 	for i, kvs := range bucket_kvs{
 		temp_file, err := ioutil.TempFile("", "temp")
 		if err != nil {
@@ -68,14 +80,12 @@ func worker_map(mapf func(string, string) []KeyValue, job_index int, nReduce int
 }
 
 func worker_reduce(reducef func(string, []string) string, job_index int, filenames []string){
-	output_filename := fmt.Sprintf("mr-out-%d", job_index)
-	temp_file, err := ioutil.TempFile("", "temp")
-	if err != nil {
-		log.Fatalf("failed to create temp file")
-	}
-	
 	intermediate_kvs := []KeyValue{}
 	for _, filename := range filenames{
+		file, err := os.Open(filename)
+		if err != nil{
+			log.Fatalf("cannot open %v", filename)
+		}
 		dec := json.NewDecoder(file)
 		for {
 			var kv KeyValue
@@ -87,30 +97,30 @@ func worker_reduce(reducef func(string, []string) string, job_index int, filenam
 	}
 
 	sort.Sort(ByKey(intermediate_kvs))
+
 	
 	temp_file, err := ioutil.TempFile("", "temp")
 	if err != nil {
 		log.Fatalf("failed to create temp file")
 	}
-
 	i := 0
-	for i < len(intermediate) {
+	for i < len(intermediate_kvs) {
 		j := i + 1
-		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+		for j < len(intermediate_kvs) && intermediate_kvs[j].Key == intermediate_kvs[i].Key {
 			j++
 		}
 		values := []string{}
 		for k := i; k < j; k++ {
-			values = append(values, intermediate[k].Value)
+			values = append(values, intermediate_kvs[k].Value)
 		}
-		output := reducef(intermediate[i].Key, values)
+		output := reducef(intermediate_kvs[i].Key, values)
 
 		// this is the correct format for each line of Reduce output.
-		fmt.Fprintf(temp_file, "%v %v\n", intermediate[i].Key, output)
+		fmt.Fprintf(temp_file, "%v %v\n", intermediate_kvs[i].Key, output)
 		i = j
 	}
 	temp_file.Close()
-
+	
 	output_filename := fmt.Sprintf("mr-out-%d", job_index)
 	os.Rename(temp_file.Name(), output_filename)
 	call("Coordinator.CompleteTask", &CompleteTaskArgs{task_type: "reduce", job_index: job_index, output_filenames: []string{output_filename}}, &CompleteTaskReply{})
@@ -126,7 +136,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 	
-	wait_time := 0.1 * time.Second
+	wait_time := 100 * time.Millisecond
 	for{
 		request_args := RequestTaskArgs{}
 		request_reply := RequestTaskReply{}
@@ -145,8 +155,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				log.Fatal("Worker: Invalid MAP input filenames")
 			}
 			worker_map(mapf, request_reply.job_index, request_reply.nReduce, request_reply.input_filenames[0])
-		}
-		else if request_reply.task_type == "reduce"{
+		} else if request_reply.task_type == "reduce"{
 			worker_reduce(reducef, request_reply.job_index, request_reply.input_filenames)
 		}
 		time.Sleep(wait_time)

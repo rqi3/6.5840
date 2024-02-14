@@ -5,13 +5,15 @@ import "net"
 import "os"
 import "net/rpc"
 import "net/http"
+import "time"
+import "sync"
 
-type MapTaskStatus{
+type MapTaskStatus struct{
 	time_assigned time.Time
 	result []string
 }
 
-type ReduceTaskStatus{
+type ReduceTaskStatus struct{
 	time_assigned time.Time
 	result string
 }
@@ -40,7 +42,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 	c.coordinator_lock.Lock()
 	defer c.coordinator_lock.Unlock()
 
-	map_tasks_all_done = true
+	map_tasks_all_done := true
 	for _, status := range c.map_task_statuses{
 		if status.result == nil{
 			map_tasks_all_done = false
@@ -63,16 +65,14 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 			reply.nReduce = c.nReduce
 			reply.job_index = -1
 			reply.input_filenames = nil
-		}
-		else{
-			status.time_assigned = time.Now()
+		} else {
+			c.map_task_statuses[map_task_index].time_assigned = time.Now()
 			reply.nReduce = c.nReduce
 			reply.task_type = "map"
 			reply.job_index = map_task_index
-			reply.input_filenames = []string{c.input_filenames[i]}
+			reply.input_filenames = []string{c.input_filenames[map_task_index]}
 		}
-	}
-	else{
+	} else {
 		//Assign a reduce task or nothing
 		reduce_task_index := -1
 		for i, status := range c.reduce_task_statuses{
@@ -87,15 +87,14 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 			reply.nReduce = c.nReduce
 			reply.job_index = -1
 			reply.input_filenames = nil
-		}
-		else{
-			status.time_assigned = time.Now()
+		} else {
+			c.reduce_task_statuses[reduce_task_index].time_assigned = time.Now()
 			reply.task_type = "reduce"
 			reply.nReduce = c.nReduce
 			reply.job_index = reduce_task_index
 			//input filenames are map_task_statuses[i].result[reduce_task_index]
-			input_filenames = make([]string, 0)
-			for i, status := range c.map_task_statuses{
+			input_filenames := make([]string, 0)
+			for _, status := range c.map_task_statuses{
 				input_filenames = append(input_filenames, status.result[reduce_task_index])
 			}
 			reply.input_filenames = input_filenames
@@ -116,8 +115,7 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 
 	if args.task_type == "map"{
 		c.map_task_statuses[job_index].result = args.output_filenames
-	}
-	else if args.task_type == "reduce"{
+	} else if args.task_type == "reduce"{
 		c.reduce_task_statuses[job_index].result = args.output_filenames[0]
 	}
 
