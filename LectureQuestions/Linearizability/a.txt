@@ -1,0 +1,1 @@
+Yes. Suppose a write occurs during the same time period as the get()s. Suppose the first get takes effect first, then the write takes effect, then the second get() takes effect. The is linearalizable because we have chosen a time for each operation that takes effect and the history is consistent with these times.

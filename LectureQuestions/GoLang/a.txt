@@ -1,0 +1,1 @@
+I like the defer keyword, it makes "clean-up" code very convenient. I also like the native support of concurrency. I don't have suggestions for changing the language.
