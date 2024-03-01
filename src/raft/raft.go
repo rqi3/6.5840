@@ -83,7 +83,7 @@ type Raft struct {
 	matchIndex []int
 
 	role int //0 = follower, 1 = candidate, 2 = leader
-	received_append bool //for follower: if it has received an append from the current leader in the current election timeout period
+	received_append_gave_vote bool //for follower: if it has received an append from the current leader in the current election timeout period, or gave a vote to someone
 	received_vote_from []bool
 }
 
@@ -99,6 +99,18 @@ func (rf *Raft) GetState() (int, bool) {
 	cur_term, is_leader := rf.currentTerm, rf.role == 2
 	// fmt.Printf("%d: GetState. Term: %d, Leader: %t \n", rf.me, cur_term, is_leader)
 	return cur_term, is_leader
+}
+
+func (rf *Raft) convertTo(new_role int) {
+	// fmt.Printf("%d: convertTo. old_role: %d, new_role: %d\n", rf.me, rf.role, new_role)
+	rf.role = new_role
+	if(new_role == 0){
+		rf.received_append_gave_vote = false
+	} else if(new_role == 1){
+		rf.received_vote_from = make([]bool, len(rf.peers))
+	} else if(new_role == 2){
+		//nothing yet
+	}
 }
 
 // save Raft's persistent state to stable storage,
@@ -179,9 +191,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		rf.role = 0
-		rf.received_append = false
-		rf.received_vote_from = make([]bool, len(rf.peers))
+		if(rf.role == 1 || rf.role == 2){
+			rf.convertTo(0)
+		}
 	}
 
 	// 1. Reply false if term < currentTerm
@@ -200,6 +212,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
+		rf.received_append_gave_vote = true
 		return
 	}
 
@@ -247,9 +260,15 @@ type RequestVoteReplyAttempt struct {
 
 func (rf *Raft) getRequestVoteChannel(server int, args *RequestVoteArgs, return_channel chan RequestVoteReplyAttempt) {
 	reply := RequestVoteReply{}
+	// fmt.Printf("%d: getRequestVoteChannel starting up to server %d....\n", rf.me, server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, &reply)
-	// fmt.Printf("%d: getRequestVoteChannel. ok: %t\n", rf.me, ok)
+	// fmt.Printf("%d: getRequestVoteChannel. ok: %t server: %d\n", rf.me, ok, server)
 	return_channel <- RequestVoteReplyAttempt{!ok, &reply}
+}
+
+func (rf *Raft) getRequestVoteChannelTimeout(return_channel chan RequestVoteReplyAttempt, timeout int) {
+	time.Sleep(time.Duration(timeout) * time.Millisecond)
+	return_channel <- RequestVoteReplyAttempt{true, nil}
 }
 
 type AppendEntriesArgs struct {
@@ -266,13 +285,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	// fmt.Printf("%d: AppendEntries. Term: %d, Leader: %d\n", rf.me, args.Term, args.LeaderId)
+
 	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		rf.role = 0
-		rf.received_append = false
-		rf.received_vote_from = make([]bool, len(rf.peers))
+		if(rf.role == 1 || rf.role == 2){
+			rf.convertTo(0)
+		}
+		rf.received_append_gave_vote = true
 	}
 
 	// 1. Reply false if term < currentTerm
@@ -281,12 +303,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
-
-	rf.received_append = true // Received an append from the current leader
+	
 	if rf.role == 2 {
 		panic("Should NOT be the leader here!")
+	} else if rf.role == 1 {
+		rf.convertTo(0) //Candidate rule: If AppendEntries RPC received from new leader: convert to follower
 	}
-	rf.role = 0 //Candidate rule: If AppendEntries RPC received from new leader: convert to follower
+	rf.received_append_gave_vote = true // Received an append from the current leader
 
 	// Reply with success!
 	reply.Term = rf.currentTerm
@@ -302,6 +325,11 @@ func (rf *Raft) getAppendEntriesChannel(server int, args *AppendEntriesArgs, ret
 	reply := AppendEntriesReply{}
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, &reply)
 	return_channel <- AppendEntriesReplyAttempt{!ok, &reply}
+}
+
+func (rf *Raft) getAppendEntriesChannelTimeout(return_channel chan AppendEntriesReplyAttempt, timeout int) {
+	time.Sleep(time.Duration(timeout) * time.Millisecond)
+	return_channel <- AppendEntriesReplyAttempt{true, nil}
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -346,18 +374,11 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) electedLeader() {
-	if(rf.role != 1){
-		panic("Not a candidate before becoming leader!")
-	}
-	rf.role = 2
-
-}
-
 func (rf *Raft) startElection(){
 	if(rf.role != 1){
 		panic("Not a candidate!")
 	}
+	// fmt.Printf("%d: Starting election\n", rf.me)
 	//increase current term
 	rf.currentTerm += 1
 	//vote for self
@@ -375,11 +396,13 @@ func (rf *Raft) startElection(){
 		channels[i] = make(chan RequestVoteReplyAttempt)
 		args := RequestVoteArgs{rf.currentTerm, rf.me}
 		go rf.getRequestVoteChannel(i, &args, channels[i])
+		timeout_val := 10
+		go rf.getRequestVoteChannelTimeout(channels[i], timeout_val)
 	}
 
 	// fmt.Printf("%d: Sent RequestVote RPCs to all other servers\n", rf.me)
 
-	vote_talley := 0
+	vote_talley := 1 //vote for self
 	for i := 0; i < len(rf.peers); i++{
 		if(i == rf.me){
 			continue
@@ -387,13 +410,14 @@ func (rf *Raft) startElection(){
 		reply_attempt := <- channels[i]
 		if(!reply_attempt.timed_out && reply_attempt.reply.Term > rf.currentTerm){
 			// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
+			// fmt.Printf("%d: Received higher term %d\n", rf.me, reply_attempt.reply.Term)
 			if(reply_attempt.reply.VoteGranted){
 				panic("Should not have voted!")
 			}
 			rf.currentTerm = reply_attempt.reply.Term
-			rf.role = 0
 			rf.votedFor = -1
-			rf.received_append = false
+			rf.convertTo(0)
+			return
 		} else if(!reply_attempt.timed_out && reply_attempt.reply.VoteGranted){
 			vote_talley += 1
 		}
@@ -403,7 +427,7 @@ func (rf *Raft) startElection(){
 
 	// If votes received from majority of servers: become leader
 	if vote_talley*2 > len(rf.peers){
-		rf.electedLeader()
+		rf.convertTo(2)
 	}
 }
 
@@ -415,6 +439,8 @@ func (rf *Raft) sendHeartbeats(){
 		}
 		append_entries_channels[i] = make(chan AppendEntriesReplyAttempt)
 		go rf.getAppendEntriesChannel(i, &AppendEntriesArgs{rf.currentTerm, rf.me}, append_entries_channels[i])
+		timeout_val := 10
+		go rf.getAppendEntriesChannelTimeout(append_entries_channels[i], timeout_val)
 	}
 	for i := 0; i < len(rf.peers); i++{
 		if(i == rf.me){
@@ -425,9 +451,8 @@ func (rf *Raft) sendHeartbeats(){
 		// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
 		if(!reply_attempt.timed_out && !reply_attempt.reply.Success && reply_attempt.reply.Term > rf.currentTerm){
 			rf.currentTerm = reply_attempt.reply.Term
-			rf.role = 0
 			rf.votedFor = -1
-			rf.received_append = false
+			rf.convertTo(0)
 			return
 		}
 	}
@@ -447,13 +472,13 @@ func (rf *Raft) ticker() {
 		// Check if a leader election should be started.
 		if(rf.role == 0){ //currently a follower
 			//check if time since last_append_time 
-			if(!rf.received_append && rf.votedFor == -1){
+			if(!rf.received_append_gave_vote){
 				//convert to candidate
 				// fmt.Printf("%d: Converted to candidate, starting election\n", rf.me)
-				rf.role = 1
-				rf.startElection()
+				rf.convertTo(1)
 			}
-		} else if (rf.role == 1){ //currently a candidate
+		}
+		if (rf.role == 1){ //currently a candidate
 			rf.startElection()
 		}
 
@@ -465,18 +490,18 @@ func (rf *Raft) ticker() {
 			// Restricted to 10 heartbeats per second
 			ms := 100
 			time.Sleep(time.Duration(ms) * time.Millisecond)
+
+			// fmt.Printf("%d: Unlocking at Heartbeat. Current role: %d\n", rf.me, rf.role)
 			rf.mu.Unlock()
 			continue
 		}
 
-		
+		// fmt.Printf("%d: Unlocking at Election Timeout. Current role: %d\n", rf.me, rf.role)
+		rf.received_append_gave_vote = false //reset whether an append was received from the leader or gave a vote
 		rf.mu.Unlock()
 		// Reset randomized election timeout
 		// rqi: changed this to wait between 500 and 1000 milliseconds
 		rf.electionTimeout()
-		rf.mu.Lock()
-		rf.received_append = false //reset whether an append was received from the leader
-		rf.mu.Unlock()
 	}
 }
 
@@ -499,7 +524,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (3A, 3B, 3C).
 	rf.votedFor = -1
 	rf.role = 0 // initially a follower
-	rf.received_append = false
+	rf.received_append_gave_vote = false
 	rf.received_vote_from = make([]bool, len(rf.peers))
 
 	// initialize from state persisted before a crash
