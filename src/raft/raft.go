@@ -27,6 +27,7 @@ Track the state of all variables
 
 import (
 	//	"bytes"
+
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -89,10 +90,15 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	// fmt.Printf("%d: GetState trying to lock...\n", rf.me)
 	rf.mu.Lock()
+	// fmt.Printf("%d: GetState locked!\n", rf.me)
 	defer rf.mu.Unlock()
 	// Your code here (3A).
-	return rf.currentTerm, rf.role == 2
+
+	cur_term, is_leader := rf.currentTerm, rf.role == 2
+	// fmt.Printf("%d: GetState. Term: %d, Leader: %t \n", rf.me, cur_term, is_leader)
+	return cur_term, is_leader
 }
 
 // save Raft's persistent state to stable storage,
@@ -165,6 +171,8 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
+	// fmt.Printf("%d: RequestVote args.Term: %d args.CandidateId: %d\n", rf.me, args.Term, args.CandidateId)
+
 	defer rf.mu.Unlock()
 
 	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
@@ -240,6 +248,7 @@ type RequestVoteReplyAttempt struct {
 func (rf *Raft) getRequestVoteChannel(server int, args *RequestVoteArgs, return_channel chan RequestVoteReplyAttempt) {
 	reply := RequestVoteReply{}
 	ok := rf.peers[server].Call("Raft.RequestVote", args, &reply)
+	// fmt.Printf("%d: getRequestVoteChannel. ok: %t\n", rf.me, ok)
 	return_channel <- RequestVoteReplyAttempt{!ok, &reply}
 }
 
@@ -362,9 +371,13 @@ func (rf *Raft) startElection(){
 		if(i == rf.me){
 			continue
 		}
+
+		channels[i] = make(chan RequestVoteReplyAttempt)
 		args := RequestVoteArgs{rf.currentTerm, rf.me}
 		go rf.getRequestVoteChannel(i, &args, channels[i])
 	}
+
+	// fmt.Printf("%d: Sent RequestVote RPCs to all other servers\n", rf.me)
 
 	vote_talley := 0
 	for i := 0; i < len(rf.peers); i++{
@@ -384,8 +397,9 @@ func (rf *Raft) startElection(){
 		} else if(!reply_attempt.timed_out && reply_attempt.reply.VoteGranted){
 			vote_talley += 1
 		}
-		
 	}
+
+	// fmt.Printf("%d Finished receiving!\n", rf.me)
 
 	// If votes received from majority of servers: become leader
 	if vote_talley*2 > len(rf.peers){
@@ -399,6 +413,7 @@ func (rf *Raft) sendHeartbeats(){
 		if(i == rf.me){
 			continue
 		}
+		append_entries_channels[i] = make(chan AppendEntriesReplyAttempt)
 		go rf.getAppendEntriesChannel(i, &AppendEntriesArgs{rf.currentTerm, rf.me}, append_entries_channels[i])
 	}
 	for i := 0; i < len(rf.peers); i++{
@@ -418,15 +433,23 @@ func (rf *Raft) sendHeartbeats(){
 	}
 }
 
+func (rf *Raft) electionTimeout(){
+	ms := 500 + (rand.Int63() % 500)
+	time.Sleep(time.Duration(ms) * time.Millisecond)
+}
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	rf.electionTimeout()
+
+	for !rf.killed() {
 		rf.mu.Lock()
+		// fmt.Printf("%d: Top of the ticker. Current role: %d\n", rf.me, rf.role)
 		// Your code here (3A)
 		// Check if a leader election should be started.
 		if(rf.role == 0){ //currently a follower
 			//check if time since last_append_time 
 			if(!rf.received_append && rf.votedFor == -1){
 				//convert to candidate
+				// fmt.Printf("%d: Converted to candidate, starting election\n", rf.me)
 				rf.role = 1
 				rf.startElection()
 			}
@@ -436,6 +459,7 @@ func (rf *Raft) ticker() {
 
 		if(rf.role == 2){ //currently a leader, or just became one. 
 			//Send Heartbeats
+			
 			rf.sendHeartbeats()
 			
 			// Restricted to 10 heartbeats per second
@@ -449,8 +473,7 @@ func (rf *Raft) ticker() {
 		rf.mu.Unlock()
 		// Reset randomized election timeout
 		// rqi: changed this to wait between 500 and 1000 milliseconds
-		ms := 500 + (rand.Int63() % 500)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		rf.electionTimeout()
 		rf.mu.Lock()
 		rf.received_append = false //reset whether an append was received from the leader
 		rf.mu.Unlock()
