@@ -1,0 +1,3 @@
+(a) could become leader; (a), (b), (e), (f) could all vote for it.
+(d) could become leader, all servers could vote for it.
+(f) could not become leader, because of the restriction that servers cannot vote for servers which are more up-to-date. All servers have higher term number entries, and thus would not vote for (f).

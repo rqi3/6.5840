@@ -1,0 +1,2 @@
+What does it mean when it says "consensus
+has already been reached when snapshotting"?

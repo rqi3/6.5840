@@ -1,0 +1,1 @@
+In the simple lock case, client needs for there to be no znode present. If a client creates a znode upon acquiring the lock, the znode will be deleted if either the client chooses to unlock, or the client dies (in which case because the node is ephemeral, the znode will also disappear).

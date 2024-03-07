@@ -1,0 +1,3 @@
+How do client requests know how to reach the leader, when the leader can change repeatedly?
+
+In order for an entry to be committed, it is required that a majority of servers append the entry. Does that include the leader?
