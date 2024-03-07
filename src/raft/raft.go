@@ -59,7 +59,9 @@ type ApplyMsg struct {
 }
 
 type LogEntry struct {
-
+	command interface{}
+	term int
+	index int
 }
 
 // A Go object implementing a single Raft peer.
@@ -110,6 +112,11 @@ func (rf *Raft) convertTo(new_role int) {
 		rf.received_vote_from = make([]bool, len(rf.peers))
 	} else if(new_role == 2){
 		//nothing yet
+		rf.nextIndex = make([]int, len(rf.peers))
+		for i := 0; i < len(rf.peers); i++ {
+			rf.nextIndex[i] = len(rf.log)
+		}
+		rf.matchIndex = make([]int, len(rf.peers))
 	}
 }
 
@@ -432,6 +439,7 @@ func (rf *Raft) startElection(){
 }
 
 func (rf *Raft) sendHeartbeats(){
+	//rqi TODO: either send heartbeats or log catchups
 	append_entries_channels := make([]chan AppendEntriesReplyAttempt, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++{
 		if(i == rf.me){
@@ -484,10 +492,11 @@ func (rf *Raft) ticker() {
 
 		if(rf.role == 2){ //currently a leader, or just became one. 
 			//Send Heartbeats
-			
 			rf.sendHeartbeats()
+
+			//
 			
-			// Restricted to 10 heartbeats per second
+			// Restricted to 10 heartbeats per second? But it still passes 3A when this is 10ms
 			ms := 100
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 
@@ -522,7 +531,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
+	rf.currentTerm = 0
 	rf.votedFor = -1
+	rf.log = make([]LogEntry, 0)
+	rf.log = append(rf.log, LogEntry{nil, -1, 0})
+
 	rf.role = 0 // initially a follower
 	rf.received_append_gave_vote = false
 	rf.received_vote_from = make([]bool, len(rf.peers))
