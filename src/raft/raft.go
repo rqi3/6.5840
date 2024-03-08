@@ -33,12 +33,14 @@ More robust role changing checks
 import (
 	//	"bytes"
 
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -139,6 +141,14 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 
@@ -160,6 +170,21 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		panic("readPersist decode error")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 
@@ -202,6 +227,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
+		rf.persist()
 		
 		// fmt.Printf("RequestVote conversion\n")
 		rf.convertToFollower()
@@ -234,6 +260,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 
 		rf.votedFor = args.CandidateId
+		rf.persist()
 		rf.received_append_or_given_vote = true
 
 		reply.Term = rf.currentTerm
@@ -323,6 +350,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.persist()
 		// fmt.Printf("AppendEntries conversion")
 		rf.convertToFollower()
 		go rf.followerTicker(rf.currentTerm)
@@ -380,6 +408,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if args.PrevLogIndex+1+i < len(rf.log) && rf.log[args.PrevLogIndex+1+i].Term != args.Entries[i].Term {
 			//delete from args.PrevLogIndex+1+i and onwards
 			rf.log = rf.log[:args.PrevLogIndex+1+i]
+			rf.persist()
 			break
 		}
 	}
@@ -390,6 +419,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				panic("Weird indexing")
 			}
 			rf.log = append(rf.log, args.Entries[i])
+			rf.persist()
 		}
 	}
 
@@ -436,6 +466,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (3B).
 	rf.log = append(rf.log, LogEntry{command, term, index})
+	rf.persist()
 	
 	return index, term, isLeader
 }
@@ -515,6 +546,7 @@ func (rf *Raft) startRequestVotes(term int) {
 				panic("Should not have voted!")
 			}
 			rf.currentTerm = reply_attempt.reply.Term
+			rf.persist()
 			// fmt.Printf("StartElection conversion")
 			rf.convertToFollower()
 			go rf.followerTicker(rf.currentTerm)
@@ -538,6 +570,7 @@ func (rf *Raft) convertToFollower(){
 	// fmt.Printf("%d: convertToFollower term = %d\n", rf.me, rf.currentTerm)
 	rf.role = 0
 	rf.votedFor = -1
+	rf.persist()
 	rf.received_append_or_given_vote = false
 }
 
@@ -579,6 +612,7 @@ func (rf *Raft) convertToCandidate(){
 	rf.role = 1
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
+	rf.persist()
 	// fmt.Printf("%d: convertToCandidate term = %d\n", rf.me, rf.currentTerm)
 }
 
@@ -677,6 +711,7 @@ func (rf *Raft) updateLogs(term int, follower int){
 
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
+		rf.persist()
 		rf.convertToFollower()
 		go rf.followerTicker(rf.currentTerm)
 		// fmt.Printf("%d: Updating logs failed, converting to follower\n", rf.me)
