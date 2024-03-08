@@ -428,7 +428,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
-		go rf.increasedCommitIndex()
 	}
 
 	// Reply with success!
@@ -769,17 +768,20 @@ func (rf *Raft) updateLogsTickers(term int){
 	}
 }
 
-func (rf *Raft) increasedCommitIndex() {
+func (rf *Raft) applyMsgTicker() {
 	// If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// fmt.Printf("%d: increased CommitIndex\n", rf.me)
+	
 	for{
-		
 		if rf.commitIndex <= rf.lastApplied {
-			break
+			rf.mu.Unlock()
+			time.Sleep(50 * time.Millisecond)
+			rf.mu.Lock()
+			continue
 		}
 		rf.lastApplied += 1
+		// fmt.Printf("%d: increased lastApplied: %v\n", rf.me, rf.lastApplied)
 		applyMsg := ApplyMsg{
 			CommandValid: true,
 			Command: rf.log[rf.lastApplied].Command,
@@ -816,7 +818,6 @@ func (rf *Raft) updateCommitIndexTicker(term int){
 			}
 			if peers_have * 2 > len(rf.peers) && rf.log[N].Term == rf.currentTerm{
 				rf.commitIndex = N
-				go rf.increasedCommitIndex()
 				break
 			}
 		}
@@ -876,7 +877,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	rf.convertToFollower()
+
 	go rf.followerTicker(rf.currentTerm)
+	go rf.applyMsgTicker()
 
 
 	return rf
