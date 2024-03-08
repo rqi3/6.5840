@@ -85,7 +85,7 @@ type Raft struct {
 	matchIndex []int
 
 	role int //0 = follower, 1 = candidate, 2 = leader
-	received_append_gave_vote bool //for follower: if it has received an append from the current leader in the current election timeout period, or gave a vote to someone
+	received_append_or_given_vote bool //for follower: if it has received an append from the current leader in the current election timeout period
 	received_vote_from []bool
 }
 
@@ -97,27 +97,9 @@ func (rf *Raft) GetState() (int, bool) {
 	// fmt.Printf("%d: GetState locked!\n", rf.me)
 	defer rf.mu.Unlock()
 	// Your code here (3A).
-
 	cur_term, is_leader := rf.currentTerm, rf.role == 2
 	// fmt.Printf("%d: GetState. Term: %d, Leader: %t \n", rf.me, cur_term, is_leader)
 	return cur_term, is_leader
-}
-
-func (rf *Raft) convertTo(new_role int) {
-	// fmt.Printf("%d: convertTo. old_role: %d, new_role: %d\n", rf.me, rf.role, new_role)
-	rf.role = new_role
-	if(new_role == 0){
-		rf.received_append_gave_vote = false
-	} else if(new_role == 1){
-		rf.received_vote_from = make([]bool, len(rf.peers))
-	} else if(new_role == 2){
-		//nothing yet
-		rf.nextIndex = make([]int, len(rf.peers))
-		for i := 0; i < len(rf.peers); i++ {
-			rf.nextIndex[i] = len(rf.log)
-		}
-		rf.matchIndex = make([]int, len(rf.peers))
-	}
 }
 
 // save Raft's persistent state to stable storage,
@@ -191,16 +173,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	// fmt.Printf("%d: RequestVote args.Term: %d args.CandidateId: %d\n", rf.me, args.Term, args.CandidateId)
-
 	defer rf.mu.Unlock()
 
 	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
-		rf.votedFor = -1
-		if(rf.role == 1 || rf.role == 2){
-			rf.convertTo(0)
-		}
+		
+		rf.convertToFollower()
+		go rf.followerTicker(rf.currentTerm)
 	}
 
 	// 1. Reply false if term < currentTerm
@@ -216,10 +196,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+		if rf.role != 0 {
+			panic("rf.role != 0")
+		}
+
 		rf.votedFor = args.CandidateId
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
-		rf.received_append_gave_vote = true
+		rf.received_append_or_given_vote = true
 		return
 	}
 
@@ -273,11 +257,6 @@ func (rf *Raft) getRequestVoteChannel(server int, args *RequestVoteArgs, return_
 	return_channel <- RequestVoteReplyAttempt{!ok, &reply}
 }
 
-func (rf *Raft) getRequestVoteChannelTimeout(return_channel chan RequestVoteReplyAttempt, timeout int) {
-	time.Sleep(time.Duration(timeout) * time.Millisecond)
-	return_channel <- RequestVoteReplyAttempt{true, nil}
-}
-
 type AppendEntriesArgs struct {
 	Term int
 	LeaderId int
@@ -286,6 +265,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term int
 	Success bool
+	FollowerId int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -298,10 +278,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		if(rf.role == 1 || rf.role == 2){
-			rf.convertTo(0)
+		rf.convertToFollower()
+		go rf.followerTicker(rf.currentTerm)
+		if(rf.role != 0){
+			panic("Should be a follower here!")
 		}
-		rf.received_append_gave_vote = true
+		rf.received_append_or_given_vote = true
 	}
 
 	// 1. Reply false if term < currentTerm
@@ -311,12 +293,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	
-	if rf.role == 2 {
-		panic("Should NOT be the leader here!")
-	} else if rf.role == 1 {
-		rf.convertTo(0) //Candidate rule: If AppendEntries RPC received from new leader: convert to follower
+	if rf.role == 1 {
+		rf.convertToFollower() //Candidate rule: If AppendEntries RPC received from new leader: convert to follower
+		go rf.followerTicker(rf.currentTerm)
 	}
-	rf.received_append_gave_vote = true // Received an append from the current leader
+
+	if rf.role != 0 {
+		panic("Should be a follower here!")
+	}
+	rf.received_append_or_given_vote = true // Received an append from the current leader
 
 	// Reply with success!
 	reply.Term = rf.currentTerm
@@ -332,11 +317,6 @@ func (rf *Raft) getAppendEntriesChannel(server int, args *AppendEntriesArgs, ret
 	reply := AppendEntriesReply{}
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, &reply)
 	return_channel <- AppendEntriesReplyAttempt{!ok, &reply}
-}
-
-func (rf *Raft) getAppendEntriesChannelTimeout(return_channel chan AppendEntriesReplyAttempt, timeout int) {
-	time.Sleep(time.Duration(timeout) * time.Millisecond)
-	return_channel <- AppendEntriesReplyAttempt{true, nil}
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -381,40 +361,44 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) startElection(){
-	if(rf.role != 1){
-		panic("Not a candidate!")
+func (rf *Raft) startElection(term int) {
+	rf.mu.Lock()
+	// fmt.Printf("%d: Starting election. Term: %d\n", rf.me, term)
+	defer rf.mu.Unlock()
+	if(rf.role != 1 || rf.currentTerm != term){
+		return
 	}
 	// fmt.Printf("%d: Starting election\n", rf.me)
 	//increase current term
-	rf.currentTerm += 1
 	//vote for self
 	rf.votedFor = rf.me
-	rf.received_vote_from = make([]bool, len(rf.peers))
-	rf.received_vote_from[rf.me] = true
 
 	//send RequestVote RPCs to all other servers
-	channels := make([]chan RequestVoteReplyAttempt, len(rf.peers))
+	channel := make(chan RequestVoteReplyAttempt, len(rf.peers)-1)
+
 	for i := 0; i < len(rf.peers); i++{
 		if(i == rf.me){
 			continue
 		}
 
-		channels[i] = make(chan RequestVoteReplyAttempt)
 		args := RequestVoteArgs{rf.currentTerm, rf.me}
-		go rf.getRequestVoteChannel(i, &args, channels[i])
-		timeout_val := 10
-		go rf.getRequestVoteChannelTimeout(channels[i], timeout_val)
+		go rf.getRequestVoteChannel(i, &args, channel)
 	}
 
-	// fmt.Printf("%d: Sent RequestVote RPCs to all other servers\n", rf.me)
-
-	vote_talley := 1 //vote for self
-	for i := 0; i < len(rf.peers); i++{
-		if(i == rf.me){
-			continue
+	votes_needed := len(rf.peers)/2 + 1
+	vote_talley := 1
+	for i := 0; i < len(rf.peers)-1; i++{
+		// fmt.Printf("%d: RequestVote i=%d\n", rf.me, i)
+		rf.mu.Unlock()
+		reply_attempt := <- channel
+		rf.mu.Lock()
+		// fmt.Printf("%d: Received reply %v\n", rf.me, reply_attempt)
+		
+		if(rf.currentTerm != term || rf.role != 1){
+			// fmt.Printf("%d: Exiting election\n", rf.me)
+			return
 		}
-		reply_attempt := <- channels[i]
+
 		if(!reply_attempt.timed_out && reply_attempt.reply.Term > rf.currentTerm){
 			// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
 			// fmt.Printf("%d: Received higher term %d\n", rf.me, reply_attempt.reply.Term)
@@ -422,95 +406,147 @@ func (rf *Raft) startElection(){
 				panic("Should not have voted!")
 			}
 			rf.currentTerm = reply_attempt.reply.Term
-			rf.votedFor = -1
-			rf.convertTo(0)
+			rf.convertToFollower()
+			go rf.followerTicker(rf.currentTerm)
 			return
 		} else if(!reply_attempt.timed_out && reply_attempt.reply.VoteGranted){
 			vote_talley += 1
+
+			if(vote_talley >= votes_needed){
+				// fmt.Printf("%d: Received majority\n", rf.me)
+				rf.convertToLeader()
+				go rf.leaderTicker(rf.currentTerm)
+				return
+			}
 		}
-	}
-
-	// fmt.Printf("%d Finished receiving!\n", rf.me)
-
-	// If votes received from majority of servers: become leader
-	if vote_talley*2 > len(rf.peers){
-		rf.convertTo(2)
 	}
 }
 
-func (rf *Raft) sendHeartbeats(){
-	//rqi TODO: either send heartbeats or log catchups
-	append_entries_channels := make([]chan AppendEntriesReplyAttempt, len(rf.peers))
-	for i := 0; i < len(rf.peers); i++{
-		if(i == rf.me){
-			continue
-		}
-		append_entries_channels[i] = make(chan AppendEntriesReplyAttempt)
-		go rf.getAppendEntriesChannel(i, &AppendEntriesArgs{rf.currentTerm, rf.me}, append_entries_channels[i])
-		timeout_val := 10
-		go rf.getAppendEntriesChannelTimeout(append_entries_channels[i], timeout_val)
+func (rf *Raft) sendHeartbeats(term int){
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if(rf.currentTerm != term || rf.role != 2){
+		return
 	}
+
+	channel := make(chan AppendEntriesReplyAttempt, len(rf.peers)-1)
 	for i := 0; i < len(rf.peers); i++{
 		if(i == rf.me){
 			continue
 		}
-		reply_attempt := <- append_entries_channels[i]
+		go rf.getAppendEntriesChannel(i, &AppendEntriesArgs{rf.currentTerm, rf.me}, channel)
+	}
+
+	for i := 0; i < len(rf.peers)-1; i++{
+		rf.mu.Unlock()
+		reply_attempt := <- channel
+		rf.mu.Lock()
+		if(rf.currentTerm != term || rf.role != 2){
+			return
+		}
 
 		// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
 		if(!reply_attempt.timed_out && !reply_attempt.reply.Success && reply_attempt.reply.Term > rf.currentTerm){
 			rf.currentTerm = reply_attempt.reply.Term
-			rf.votedFor = -1
-			rf.convertTo(0)
+			rf.convertToFollower()
+			go rf.followerTicker(rf.currentTerm)
 			return
 		}
 	}
 }
 
-func (rf *Raft) electionTimeout(){
-	ms := 500 + (rand.Int63() % 500)
-	time.Sleep(time.Duration(ms) * time.Millisecond)
+func (rf *Raft) convertToFollower(){
+	rf.role = 0
+	rf.votedFor = -1
+	rf.received_append_or_given_vote = false
 }
-func (rf *Raft) ticker() {
-	rf.electionTimeout()
 
-	for !rf.killed() {
-		rf.mu.Lock()
-		// fmt.Printf("%d: Top of the ticker. Current role: %d\n", rf.me, rf.role)
-		// Your code here (3A)
-		// Check if a leader election should be started.
-		if(rf.role == 0){ //currently a follower
-			//check if time since last_append_time 
-			if(!rf.received_append_gave_vote){
-				//convert to candidate
-				// fmt.Printf("%d: Converted to candidate, starting election\n", rf.me)
-				rf.convertTo(1)
-			}
-		}
-		if (rf.role == 1){ //currently a candidate
-			rf.startElection()
-		}
+func (rf *Raft) followerTicker(term int){
+	//election timeout --> start election
+	rf.mu.Lock()
+	// fmt.Printf("%d: followerTicker beginning\n", rf.me)
+	defer rf.mu.Unlock()
+	if(rf.role != 0 || term != rf.currentTerm){
+		return
+	}
 
-		if(rf.role == 2){ //currently a leader, or just became one. 
-			//Send Heartbeats
-			rf.sendHeartbeats()
-
-			//
-			
-			// Restricted to 10 heartbeats per second? But it still passes 3A when this is 10ms
-			ms := 100
-			time.Sleep(time.Duration(ms) * time.Millisecond)
-
-			// fmt.Printf("%d: Unlocking at Heartbeat. Current role: %d\n", rf.me, rf.role)
-			rf.mu.Unlock()
-			continue
-		}
-
-		// fmt.Printf("%d: Unlocking at Election Timeout. Current role: %d\n", rf.me, rf.role)
-		rf.received_append_gave_vote = false //reset whether an append was received from the leader or gave a vote
+	for {
 		rf.mu.Unlock()
-		// Reset randomized election timeout
-		// rqi: changed this to wait between 500 and 1000 milliseconds
-		rf.electionTimeout()
+
+		ms := 500 + (rand.Int63() % 500)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+
+		rf.mu.Lock()
+		if(term != rf.currentTerm){ //check state
+			// fmt.Printf("%d: followerTicker term changed\n", rf.me)
+			return
+		}
+
+		if(!rf.received_append_or_given_vote){ //convert to candidate
+			rf.convertToCandidate()
+			go rf.candidateTicker(rf.currentTerm)
+			return
+		}
+		// fmt.Printf("%d: followerTicker continuing\n", rf.me)
+		rf.received_append_or_given_vote = false
+	}
+}
+
+func (rf *Raft) convertToCandidate(){
+	rf.role = 1
+}
+
+func (rf *Raft) candidateTicker(term int){
+	rf.mu.Lock()
+	// fmt.Printf("%d: candidateTicker beginning\n", rf.me)
+	defer rf.mu.Unlock()
+
+	if(rf.role != 1 || rf.currentTerm != term){ //should have already increased term when became candidate
+		return
+	}
+
+	for{
+		// fmt.Printf("%d: candidateTicker term = %d starting election\n", rf.me, term)
+		term += 1
+		rf.currentTerm += 1
+		go rf.startElection(term)
+		rf.mu.Unlock()
+
+		ms := 100
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		rf.mu.Lock()
+
+		if(rf.currentTerm != term || rf.role != 1){
+			// fmt.Printf("%d: Exiting candidateTicker, term = %d, currentTerm = %d, role = %d\n", rf.me, term, rf.currentTerm, rf.role)
+			return
+		}
+		//times out, new election
+	}
+}
+
+func (rf *Raft) convertToLeader(){
+	rf.role = 2
+}
+func (rf *Raft) leaderTicker(term int){
+	rf.mu.Lock()
+	// fmt.Printf("%d: leaderTicker beginning\n", rf.me)
+	defer rf.mu.Unlock()
+
+	if(rf.currentTerm != term){
+		return
+	}
+
+	for{
+		// fmt.Printf("%d: leader sending heartbeats\n", rf.me)
+		go rf.sendHeartbeats(term)
+		rf.mu.Unlock()
+		ms := 100
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		rf.mu.Lock()
+		if(rf.currentTerm != term || rf.role != 2){
+			return
+		}
 	}
 }
 
@@ -537,14 +573,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = append(rf.log, LogEntry{nil, -1, 0})
 
 	rf.role = 0 // initially a follower
-	rf.received_append_gave_vote = false
+	rf.received_append_or_given_vote = false
 	rf.received_vote_from = make([]bool, len(rf.peers))
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
-	go rf.ticker()
+	rf.convertToFollower()
+	go rf.followerTicker(rf.currentTerm)
 
 
 	return rf
