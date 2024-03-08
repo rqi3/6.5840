@@ -303,11 +303,19 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term int
 	Success bool
+
+	XTerm int
+	XIndex int
+	XLen int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	reply.XIndex = -1
+	reply.XTerm = -1
+	reply.XLen = -1
 
 	// fmt.Printf("%d: AppendEntries. Term: %d, Leader: %d\n", rf.me, args.Term, args.LeaderId)
 
@@ -345,6 +353,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		//Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+		if args.PrevLogIndex >= len(rf.log) {
+			reply.XTerm = -1
+			reply.XIndex = -1
+			reply.XLen = len(rf.log)
+		} else {
+			reply.XTerm = rf.log[args.PrevLogIndex].Term
+			reply.XIndex = args.PrevLogIndex
+			reply.XLen = len(rf.log)
+
+			for i := 0; i <= reply.XIndex; i++ {
+				if rf.log[i].Term == reply.XTerm {
+					reply.XIndex = i
+					break
+				}
+			}
+		}
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -440,7 +464,7 @@ func (rf *Raft) electionTimeout() {
 	time.Sleep(time.Duration(ms) * time.Millisecond)
 }
 
-func (rf *Raft) startElection(term int) {
+func (rf *Raft) startRequestVotes(term int) {
 	rf.mu.Lock()
 	// fmt.Printf("%d: Starting election. Term: %d\n", rf.me, term)
 	defer rf.mu.Unlock()
@@ -450,7 +474,6 @@ func (rf *Raft) startElection(term int) {
 	// fmt.Printf("%d: Starting election\n", rf.me)
 	//increase current term
 	//vote for self
-	rf.votedFor = rf.me
 
 	//send RequestVote RPCs to all other servers
 	channel := make(chan RequestVoteReplyAttempt, len(rf.peers)-1)
@@ -554,6 +577,8 @@ func (rf *Raft) followerTicker(term int){
 
 func (rf *Raft) convertToCandidate(){
 	rf.role = 1
+	rf.currentTerm += 1
+	rf.votedFor = rf.me
 	// fmt.Printf("%d: convertToCandidate term = %d\n", rf.me, rf.currentTerm)
 }
 
@@ -566,22 +591,16 @@ func (rf *Raft) candidateTicker(term int){
 		return
 	}
 
-	for{
-		// fmt.Printf("%d: candidateTicker term = %d starting election\n", rf.me, term)
-		term += 1
-		rf.currentTerm += 1
-		go rf.startElection(term)
-		rf.mu.Unlock()
-
-		rf.electionTimeout()
-		rf.mu.Lock()
-
-		if(rf.currentTerm != term || rf.role != 1){
-			// fmt.Printf("%d: Exiting candidateTicker, term = %d, currentTerm = %d, role = %d\n", rf.me, term, rf.currentTerm, rf.role)
-			return
-		}
-		//times out, new election
+	go rf.startRequestVotes(term)
+	rf.mu.Unlock()
+	rf.electionTimeout()
+	rf.mu.Lock()
+	if(rf.currentTerm != term || rf.role != 1){
+		// fmt.Printf("%d: Exiting candidateTicker, term = %d, currentTerm = %d, role = %d\n", rf.me, term, rf.currentTerm, rf.role)
+		return
 	}
+	rf.convertToCandidate()
+	go rf.candidateTicker(rf.currentTerm)
 }
 
 func (rf *Raft) convertToLeader(){
@@ -666,7 +685,25 @@ func (rf *Raft) updateLogs(term int, follower int){
 
 	// conflict: decrement nextIndex and retry (§5.3)
 	// fmt.Printf("%d: Updating logs failed, decrementing nextIndex and retrying\n", rf.me)
-	rf.nextIndex[follower] = rf.nextIndex[follower] - 1 //TODO: backup more than 1 at a time
+	if reply.XLen == -1{
+		panic("XLen is -1!")
+	}
+	if reply.XTerm != -1 {
+		last_XTerm_index := -1
+		for i := 0; i < len(rf.log); i++{
+			if rf.log[i].Term == reply.XTerm{
+				last_XTerm_index = i
+			}
+		}
+
+		if last_XTerm_index == -1 {
+			rf.nextIndex[follower] = reply.XIndex
+		} else {
+			rf.nextIndex[follower] = last_XTerm_index
+		}
+	} else {
+		rf.nextIndex[follower] = reply.XLen
+	}
 	go rf.updateLogs(term, follower)
 }
 
