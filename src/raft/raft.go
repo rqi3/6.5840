@@ -687,7 +687,7 @@ func (rf *Raft) updateLogsTickers(term int){
 			go rf.updateLogs(term, i)
 		}
 		rf.mu.Unlock()
-		ms := 30
+		ms := 50
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Lock()
 		if(rf.currentTerm != term || rf.role != 2){
@@ -750,7 +750,7 @@ func (rf *Raft) updateCommitIndexTicker(term int){
 		}
 
 		rf.mu.Unlock()
-		ms := 10
+		ms := 50
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Lock()
 		if(rf.currentTerm != term || rf.role != 2){
