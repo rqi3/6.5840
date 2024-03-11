@@ -692,10 +692,7 @@ func (rf *Raft) updateLogs(term int, follower int){
 	if rf.currentTerm != term || rf.role != 2{
 		return
 	}
-	if rf.nextIndex[follower] != orig_nextIndex || rf.matchIndex[follower] != orig_matchIndex{
-		//safety check, maybe too strict?
-		return
-	}
+	
 	if !ok {
 		return
 	}
@@ -703,8 +700,13 @@ func (rf *Raft) updateLogs(term int, follower int){
 	if reply.Success {
 		// : update nextIndex and matchIndex for follower (§5.3)
 		// fmt.Printf("%d: Updating logs success, updating nextIndex and matchIndex\n", rf.me)
-		rf.nextIndex[follower] = args.PrevLogIndex + len(args.Entries) + 1
+		rf.nextIndex[follower] = max(rf.nextIndex[follower], args.PrevLogIndex + len(args.Entries) + 1)
 		rf.matchIndex[follower] = max(rf.matchIndex[follower], args.PrevLogIndex + len(args.Entries))
+		return
+	}
+
+	if rf.nextIndex[follower] != orig_nextIndex || rf.matchIndex[follower] != orig_matchIndex{
+		//safety check, maybe too strict?
 		return
 	}
 

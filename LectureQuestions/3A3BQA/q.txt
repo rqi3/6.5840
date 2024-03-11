@@ -1,0 +1,5 @@
+Multiple questions, sorry!
+
+Every time we release the lock, is it sufficient to check that the current term has not changed and that the role (candidate/follower/leader) has not changed?
+
+As a leader, if a follower replies to your AppendEntries RPC with a success, how should nextIndex be updated? There is possible ambiguity here because another AppendEntriesRPC to the same follower could have been done, and the replies could be received at the same time, in which case nextIndex could have changed already. Is it reasonable to check whether nextIndex has changed in between sending the AppendEntries and receiving a response, and if a change has been made, ignore the reply?
