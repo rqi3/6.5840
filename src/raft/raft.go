@@ -26,8 +26,7 @@ Track the state of all variables
 Consider state after unlocking
 
 TODO:
-Apply 3C optimization
-More robust role changing checks
+Persistence is incorrect; some changes need to be atomic.
 */
 
 import (
