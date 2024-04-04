@@ -226,10 +226,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
-		rf.persist()
-		
 		// fmt.Printf("RequestVote conversion\n")
 		rf.convertToFollower()
+		rf.persist() //maybe incorrect, look at the next rf.persist()?
 		go rf.followerTicker(rf.currentTerm)
 	}
 
@@ -349,9 +348,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		rf.persist()
 		// fmt.Printf("AppendEntries conversion")
 		rf.convertToFollower()
+		rf.persist()
+
 		go rf.followerTicker(rf.currentTerm)
 		if(rf.role != 0){
 			panic("Should be a follower here!")
@@ -369,6 +369,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.role == 1 {
 		// fmt.Printf("AppendEntries conversion2")
 		rf.convertToFollower() //Candidate rule: If AppendEntries RPC received from new leader: convert to follower
+		rf.persist()
 		go rf.followerTicker(rf.currentTerm)
 	}
 
@@ -544,9 +545,10 @@ func (rf *Raft) startRequestVotes(term int) {
 				panic("Should not have voted!")
 			}
 			rf.currentTerm = reply_attempt.reply.Term
-			rf.persist()
+			// rf.persist() - removed
 			// fmt.Printf("StartElection conversion")
 			rf.convertToFollower()
+			rf.persist()
 			go rf.followerTicker(rf.currentTerm)
 			return
 		} else if(!reply_attempt.timed_out && reply_attempt.reply.VoteGranted){
@@ -568,7 +570,7 @@ func (rf *Raft) convertToFollower(){
 	// fmt.Printf("%d: convertToFollower term = %d\n", rf.me, rf.currentTerm)
 	rf.role = 0
 	rf.votedFor = -1
-	rf.persist()
+	// rf.persist() - removed
 	rf.received_append_or_given_vote = false
 }
 
@@ -598,6 +600,7 @@ func (rf *Raft) followerTicker(term int){
 		if(!rf.received_append_or_given_vote){ //convert to candidate
 			// fmt.Printf("%d: followerTicker converting to candidate\n", rf.me)
 			rf.convertToCandidate()
+			rf.persist()
 			go rf.candidateTicker(rf.currentTerm)
 			return
 		}
@@ -610,7 +613,7 @@ func (rf *Raft) convertToCandidate(){
 	rf.role = 1
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
-	rf.persist()
+	// rf.persist() - removed
 	// fmt.Printf("%d: convertToCandidate term = %d\n", rf.me, rf.currentTerm)
 }
 
@@ -632,6 +635,7 @@ func (rf *Raft) candidateTicker(term int){
 		return
 	}
 	rf.convertToCandidate()
+	rf.persist()
 	go rf.candidateTicker(rf.currentTerm)
 }
 
@@ -711,8 +715,8 @@ func (rf *Raft) updateLogs(term int, follower int){
 
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
-		rf.persist()
 		rf.convertToFollower()
+		rf.persist()
 		go rf.followerTicker(rf.currentTerm)
 		// fmt.Printf("%d: Updating logs failed, converting to follower\n", rf.me)
 		return
@@ -878,6 +882,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	rf.convertToFollower()
+	rf.persist()
 
 	go rf.followerTicker(rf.currentTerm)
 	go rf.applyMsgTicker()
