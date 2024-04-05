@@ -886,9 +886,7 @@ func (rf *Raft) lastApplyTicker() {
 			Command: rf.log[rf.lastApplied - rf.logStart].Command,
 			CommandIndex: rf.lastApplied,
 		}
-		rf.mu.Unlock()
 		rf.proxyApplyCh <- applyMsg
-		rf.mu.Lock()
 	}
 }
 
