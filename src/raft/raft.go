@@ -31,6 +31,7 @@ import (
 	//	"bytes"
 
 	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -702,18 +703,19 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	rf.snapshotBytes = args.Data
 	rf.logStart = args.LastIncludedIndex
+	fmt.Printf("%d: InstallSnapshot. rf.logStart = %d\n", rf.me, rf.logStart)
 	for i := 0; i < len(rf.log); i++{
 		if rf.log[i].Index == args.LastIncludedIndex && rf.log[i].Term == args.LastIncludedTerm{
 			// If existing log entry has same index and term as snapshot’s last included entry, retain log entries following it and reply
+			//TODO: what if these entries are not committed?
 			rf.log = rf.log[i:]
 			return
 		}
 	}
-
 	rf.log = []LogEntry{{Term: args.LastIncludedTerm, Index: args.LastIncludedIndex}}
-	//TODO how to apply applyMsgs in increasing order?
-	rf.lastApplied = max(rf.lastApplied, args.LastIncludedIndex)
+	rf.lastApplied = args.LastIncludedIndex
 	rf.proxyApplyCh <- ApplyMsg{CommandValid: false, SnapshotValid: true, Snapshot: rf.snapshotBytes, SnapshotTerm: args.LastIncludedTerm, SnapshotIndex: args.LastIncludedIndex}
+	//TODO: How to persist correctly?
 }
 
 func (rf *Raft) updateLogs(term int, follower int){
@@ -869,7 +871,9 @@ func (rf *Raft) lastApplyTicker() {
 	defer rf.mu.Unlock()
 	
 	for{
-		rf.lastApplied = max(rf.lastApplied, rf.logStart) //don't need to commit if snapshotted?
+		//TODO: DANGEROUS
+		fmt.Printf("%d: lastApplyTicker. lastApplied: %v rf.logStart: %v\n", rf.me, rf.lastApplied, rf.logStart)
+		rf.lastApplied = max(rf.lastApplied, rf.logStart) //don't need to commit if snapshotted? Does this line actually do anything?
 		if rf.commitIndex <= rf.lastApplied {
 			rf.mu.Unlock()
 			time.Sleep(50 * time.Millisecond)
@@ -893,6 +897,7 @@ func (rf *Raft) lastApplyTicker() {
 func (rf *Raft) proxyApplyMsgTicker(){
 	for{
 		msg := <-rf.proxyApplyCh
+		fmt.Printf("%d: proxyApplyMsgTicker: msg.CommandValid = %t, msg.CommandIndex = %d, msg.SnapshotIndex = %d\n", rf.me, msg.CommandValid, msg.CommandIndex, msg.SnapshotIndex)
 		rf.applyCh <- msg
 	}
 }
