@@ -97,6 +97,7 @@ type Raft struct {
 	votedFor int
 	log []LogEntry
 	logStart int
+
 	snapshotBytes []byte
 
 	commitIndex int
@@ -148,14 +149,13 @@ func (rf *Raft) persist() {
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
 	e.Encode(rf.logStart)
-	e.Encode(rf.snapshotBytes)
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, rf.snapshotBytes)
 }
 
 
 // restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersist(data []byte, snapshot []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
@@ -179,21 +179,19 @@ func (rf *Raft) readPersist(data []byte) {
 	var votedFor int
 	var log []LogEntry
 	var logStart int
-	var snapshotBytes []byte
 
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&log) != nil || 
-		d.Decode(&logStart) != nil ||
-		d.Decode(&snapshotBytes) != nil {
+		d.Decode(&logStart) != nil {
 		panic("readPersist decode error")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
 		rf.logStart = logStart
-		rf.snapshotBytes = snapshotBytes
 	}
+	rf.snapshotBytes = snapshot
 }
 
 
@@ -203,6 +201,9 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// fmt.Printf("%d: Snapshot. len(rf.log) = %d\n", rf.me, len(rf.log))
 	if index > rf.logStart {
 		rf.log = rf.log[index-rf.logStart:]
 		rf.logStart = index
@@ -594,7 +595,6 @@ func (rf *Raft) convertToFollower(){
 func (rf *Raft) followerTicker(term int){
 	//election timeout --> start election
 	rf.mu.Lock()
-
 	// fmt.Printf("%d: followerTicker beginning\n", rf.me)
 	defer rf.mu.Unlock()
 	if(rf.role != 0 || term != rf.currentTerm){
@@ -604,6 +604,7 @@ func (rf *Raft) followerTicker(term int){
 	for {
 		rf.mu.Unlock()
 
+		// fmt.Printf("%d: Log length: %d, Log start: %d\n", rf.me, len(rf.log), rf.logStart)
 		
 		rf.electionTimeout()
 		
@@ -867,6 +868,7 @@ func (rf *Raft) applyMsgTicker() {
 	defer rf.mu.Unlock()
 	
 	for{
+		rf.lastApplied = max(rf.lastApplied, rf.logStart) //don't need to commit if snapshotted?
 		if rf.commitIndex <= rf.lastApplied {
 			rf.mu.Unlock()
 			time.Sleep(50 * time.Millisecond)
@@ -906,7 +908,7 @@ func (rf *Raft) updateCommitIndexTicker(term int){
 	}
 
 	for{
-		for N := len(rf.log)-1 + rf.logStart; N > rf.commitIndex; N--{
+		for N := len(rf.log)-1 + rf.logStart; N >= max(rf.logStart+1, rf.commitIndex+1); N--{
 			//check if a majority of matchIndex[i] >= N
 			peers_have := 0
 			for i := 0; i < len(rf.peers); i++{
@@ -977,7 +979,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.snapshotApplyCh = make(chan ApplyMsg, 100)
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
 	rf.commitIndex = rf.logStart
 	rf.lastApplied = rf.logStart
 
