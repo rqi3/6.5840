@@ -110,7 +110,7 @@ type Raft struct {
 	received_vote_from []bool
 
 	applyCh chan ApplyMsg
-	snapshotApplyCh chan ApplyMsg
+	proxyApplyCh chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -712,7 +712,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.log = []LogEntry{{Term: args.LastIncludedTerm, Index: args.LastIncludedIndex}}
 	//TODO how to apply applyMsgs in increasing order?
-	rf.snapshotApplyCh <- ApplyMsg{CommandValid: false, SnapshotValid: true, Snapshot: rf.snapshotBytes, SnapshotTerm: args.LastIncludedTerm, SnapshotIndex: args.LastIncludedIndex}
+	rf.lastApplied = max(rf.lastApplied, args.LastIncludedIndex)
+	rf.proxyApplyCh <- ApplyMsg{CommandValid: false, SnapshotValid: true, Snapshot: rf.snapshotBytes, SnapshotTerm: args.LastIncludedTerm, SnapshotIndex: args.LastIncludedIndex}
 }
 
 func (rf *Raft) updateLogs(term int, follower int){
@@ -862,7 +863,7 @@ func (rf *Raft) updateLogsTickers(term int){
 	}
 }
 
-func (rf *Raft) applyMsgTicker() {
+func (rf *Raft) lastApplyTicker() {
 	// If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -886,15 +887,15 @@ func (rf *Raft) applyMsgTicker() {
 			CommandIndex: rf.lastApplied,
 		}
 		rf.mu.Unlock()
-		rf.applyCh <- applyMsg
+		rf.proxyApplyCh <- applyMsg
 		rf.mu.Lock()
 	}
 }
 
-func (rf *Raft) applySnapshotTicker(){
+func (rf *Raft) proxyApplyMsgTicker(){
 	for{
-		snapshotMsg := <-rf.snapshotApplyCh
-		rf.applyCh <- snapshotMsg
+		msg := <-rf.proxyApplyCh
+		rf.applyCh <- msg
 	}
 }
 func (rf *Raft) updateCommitIndexTicker(term int){
@@ -976,7 +977,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.received_append_or_given_vote = false
 	rf.received_vote_from = make([]bool, len(rf.peers))
 	rf.applyCh = applyCh
-	rf.snapshotApplyCh = make(chan ApplyMsg, 100)
+	rf.proxyApplyCh = make(chan ApplyMsg, 1000)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
@@ -988,9 +989,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persist()
 
 	go rf.followerTicker(rf.currentTerm)
-	go rf.applyMsgTicker()
-	go rf.applySnapshotTicker()
-
+	go rf.lastApplyTicker()
+	go rf.proxyApplyMsgTicker()
 
 	return rf
 }
