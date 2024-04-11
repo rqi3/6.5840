@@ -1,13 +1,18 @@
 package kvraft
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+
+	"6.5840/labrpc"
+)
 
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	possible_leader int // index of the leader, maybe
+	client_id int64
 }
 
 func nrand() int64 {
@@ -17,10 +22,18 @@ func nrand() int64 {
 	return x
 }
 
+// func randStr() string {
+// 	num := nrand()
+// 	return strconv.FormatInt(num, 10)
+// }
+
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.possible_leader = 0
+	ck.client_id = nrand()
+	
 	return ck
 }
 
@@ -35,9 +48,21 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	operation_id := nrand()
+	
+	for{
+		args := GetArgs{Key: key, ClientId: ck.client_id, OperationId: operation_id}
+		reply := GetReply{}
+		ok := ck.servers[ck.possible_leader].Call("KVServer.Get", &args, &reply)
+
+		if !ok || reply.Err != "" {
+			ck.possible_leader = (ck.possible_leader + 1) % len(ck.servers)
+			continue
+		}
+
+		return reply.Value
+	}
 }
 
 // shared by Put and Append.
@@ -50,6 +75,20 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	operation_id := nrand()
+	
+	for{
+		args := PutAppendArgs{Key: key, ClientId: ck.client_id, OperationId: operation_id}
+		reply := PutAppendReply{}
+		ok := ck.servers[ck.possible_leader].Call("KVServer.Get", &args, &reply)
+
+		if !ok || reply.Err != "" {
+			ck.possible_leader = (ck.possible_leader + 1) % len(ck.servers)
+			continue
+		}
+
+		return //success!
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
