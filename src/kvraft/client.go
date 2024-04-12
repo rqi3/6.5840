@@ -49,6 +49,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
+	// fmt.Printf("Get %s\n", key)
 	operation_id := nrand()
 	
 	for{
@@ -75,18 +76,19 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	// fmt.Printf("PutAppend %s %s %s\n", key, value, op)
 	operation_id := nrand()
 	
 	for{
-		args := PutAppendArgs{Key: key, ClientId: ck.client_id, OperationId: operation_id}
+		args := PutAppendArgs{Key: key, Value: value, ClientId: ck.client_id, OperationId: operation_id}
 		reply := PutAppendReply{}
-		ok := ck.servers[ck.possible_leader].Call("KVServer.Get", &args, &reply)
+		ok := ck.servers[ck.possible_leader].Call("KVServer." + op, &args, &reply)
 
 		if !ok || reply.Err != "" {
 			ck.possible_leader = (ck.possible_leader + 1) % len(ck.servers)
 			continue
 		}
-
+		// fmt.Printf("Success %s %s %s\n", key, value, op)
 		return //success!
 	}
 }

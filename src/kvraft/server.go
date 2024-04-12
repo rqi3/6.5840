@@ -83,6 +83,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	value := kv.map_vals[args.Key]
 	reply.Value = value
+	// fmt.Printf("%d: Success! Get %s: %s\n", kv.me, args.Key, value)
 }
 
 func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
@@ -153,6 +154,8 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = "DifferentThingCommitted"
 		return
 	}
+
+	// fmt.Printf("%d: Success Append %s %s\n", kv.me, args.Key, args.Value)
 }
 
 func (kv *KVServer) applier() {
@@ -161,6 +164,7 @@ func (kv *KVServer) applier() {
 		kv.mu.Lock()
 		if msg.CommandValid {
 			op := msg.Command.(Op)
+			// fmt.Printf("%d: Apply %s %s %s\n", kv.me, op.OpType, op.Key, op.Value)
 			if op.OpType == "Get" {
 				//do nothing
 			} else if op.OpType == "Put" {
@@ -222,9 +226,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.map_vals = make(map[string]string)
+	kv.alert_channels = make(map[int][]chan raft.ApplyMsg)
 
 	// You may need initialization code here.
 	go kv.applier()

@@ -483,6 +483,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (3B).
 	rf.log = append(rf.log, LogEntry{command, term, index})
 	rf.persist()
+
+	for i := 0; i < len(rf.peers); i++{
+		if(i == rf.me){
+			continue
+		}
+		go rf.updateLogs(rf.currentTerm, i)
+	}
 	
 	return index, term, isLeader
 }
@@ -890,7 +897,7 @@ func (rf *Raft) lastApplyTicker() {
 
 		if rf.commitIndex <= rf.lastApplied {
 			rf.mu.Unlock()
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 			rf.mu.Lock()
 			continue
 		}
@@ -941,7 +948,7 @@ func (rf *Raft) updateCommitIndexTicker(term int){
 		}
 
 		rf.mu.Unlock()
-		ms := 50
+		ms := 10
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Lock()
 		if(rf.currentTerm != term || rf.role != 2){
