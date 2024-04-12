@@ -1,12 +1,13 @@
 package kvraft
 
 import (
-	"6.5840/labgob"
-	"6.5840/labrpc"
-	"6.5840/raft"
 	"log"
 	"sync"
 	"sync/atomic"
+
+	"6.5840/labgob"
+	"6.5840/labrpc"
+	"6.5840/raft"
 )
 
 const Debug = false
@@ -23,6 +24,11 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	OpType string
+	Key string
+	Value string
+	ClientId int64
+	OperationId int64
 }
 
 type KVServer struct {
@@ -35,19 +41,144 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	map_vals map[string]string
+
+	//for an index, the channels that need to be alerted
+	alert_channels map[int][]chan raft.ApplyMsg
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	
+	index, _, isLeader := kv.rf.Start(Op{OpType: "Get", Key: args.Key, ClientId: args.ClientId, OperationId: args.OperationId})
+
+	if !isLeader{
+		reply.Err = "NotLeader"
+		return
+	}
+	// wait for committed
+	alert_channel := make(chan raft.ApplyMsg, 1)
+
+	existing_channel_list := make([]chan raft.ApplyMsg, 0)
+	if kv.alert_channels[index] != nil {
+		existing_channel_list = kv.alert_channels[index]
+	}
+	kv.alert_channels[index] = append(existing_channel_list, alert_channel)
+	kv.mu.Unlock()
+	//if committed, return value
+	apply_msg :=<-alert_channel
+	kv.mu.Lock()
+
+	if apply_msg.CommandIndex != index {
+		panic("index mismatch")
+	}
+
+	if apply_msg.Command.(Op).OperationId != args.OperationId {
+		reply.Err = "DifferentThingCommitted"
+		return
+	}
+	value := kv.map_vals[args.Key]
+	reply.Value = value
 }
 
 func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	
+	index, _, isLeader := kv.rf.Start(Op{OpType: "Put", Key: args.Key, Value: args.Value, ClientId: args.ClientId, OperationId: args.OperationId})
+
+	if !isLeader{
+		reply.Err = "NotLeader"
+		return
+	}
+	// wait for committed
+	alert_channel := make(chan raft.ApplyMsg, 1)
+
+	existing_channel_list := make([]chan raft.ApplyMsg, 0)
+	if kv.alert_channels[index] != nil {
+		existing_channel_list = kv.alert_channels[index]
+	}
+	kv.alert_channels[index] = append(existing_channel_list, alert_channel)
+	kv.mu.Unlock()
+	//if committed, return value
+	apply_msg := <-alert_channel
+	kv.mu.Lock()
+
+	if apply_msg.CommandIndex != index {
+		panic("index mismatch")
+	}
+
+	if apply_msg.Command.(Op).OperationId != args.OperationId {
+		reply.Err = "DifferentThingCommitted"
+		return
+	}
 }
 
 func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	
+	index, _, isLeader := kv.rf.Start(Op{OpType: "Append", Key: args.Key, Value: args.Value, ClientId: args.ClientId, OperationId: args.OperationId})
+
+	if !isLeader{
+		reply.Err = "NotLeader"
+		return
+	}
+	// wait for committed
+	alert_channel := make(chan raft.ApplyMsg, 1)
+
+	existing_channel_list := make([]chan raft.ApplyMsg, 0)
+	if kv.alert_channels[index] != nil {
+		existing_channel_list = kv.alert_channels[index]
+	}
+	kv.alert_channels[index] = append(existing_channel_list, alert_channel)
+	kv.mu.Unlock()
+	//if committed, return value
+	apply_msg := <-alert_channel
+	kv.mu.Lock()
+
+	if apply_msg.CommandIndex != index {
+		panic("index mismatch")
+	}
+
+	if apply_msg.Command.(Op).OperationId != args.OperationId {
+		reply.Err = "DifferentThingCommitted"
+		return
+	}
+}
+
+func (kv *KVServer) applier() {
+	for{
+		msg := <-kv.applyCh
+		kv.mu.Lock()
+		if msg.CommandValid {
+			op := msg.Command.(Op)
+			if op.OpType == "Get" {
+				//do nothing
+			} else if op.OpType == "Put" {
+				kv.map_vals[op.Key] = op.Value
+			} else if op.OpType == "Append" {
+				kv.map_vals[op.Key] += op.Value
+			}
+
+			// alert RPCs
+			idx := msg.CommandIndex
+			if kv.alert_channels[idx] != nil {
+				for _, ch := range kv.alert_channels[idx] {
+					ch <- msg
+				}
+			}
+		}
+		kv.mu.Unlock()
+	}
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -96,6 +227,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	go kv.applier()
 
 	return kv
 }
