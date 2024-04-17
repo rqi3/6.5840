@@ -3,6 +3,7 @@ package kvraft
 import (
 	"crypto/rand"
 	"math/big"
+	"time"
 
 	"6.5840/labrpc"
 )
@@ -53,11 +54,36 @@ func (ck *Clerk) Get(key string) string {
 	operation_id := nrand()
 	
 	for{
-		args := GetArgs{Key: key, ClientId: ck.client_id, OperationId: operation_id}
-		reply := GetReply{}
-		ok := ck.servers[ck.possible_leader].Call("KVServer.Get", &args, &reply)
+		
+		
+		return_channel := make(chan GetReply, 1)
+		timeout := make(chan bool, 1)
 
-		if !ok || reply.Err != "" {
+		go func(leader int) {
+			args := GetArgs{Key: key, ClientId: ck.client_id, OperationId: operation_id}
+			reply_copy := GetReply{}
+			ok := ck.servers[leader].Call("KVServer.Get", &args, &reply_copy)
+			if ok {
+				return_channel <- reply_copy
+			} else {
+				return_channel <- GetReply{Err: "BadCall"}
+			}
+		}(ck.possible_leader)
+		go func(){
+			time.Sleep(150 * time.Millisecond)
+			timeout <- true
+		}()
+
+		reply := GetReply{Err: "Null"}
+		select {
+			case a := <- return_channel:
+				// a read from ch has occurred
+				reply = a
+			case <-timeout:
+				reply = GetReply{Err: "Timeout"}
+		}
+
+		if reply.Err != "" {
 			ck.possible_leader = (ck.possible_leader + 1) % len(ck.servers)
 			continue
 		}
@@ -80,11 +106,34 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	operation_id := nrand()
 	
 	for{
-		args := PutAppendArgs{Key: key, Value: value, ClientId: ck.client_id, OperationId: operation_id}
-		reply := PutAppendReply{}
-		ok := ck.servers[ck.possible_leader].Call("KVServer." + op, &args, &reply)
+		
+		return_channel := make(chan PutAppendReply, 1)
+		timeout := make(chan bool, 1)
+		go func(leader int) {
+			args := PutAppendArgs{Key: key, Value: value, ClientId: ck.client_id, OperationId: operation_id}
+			reply_copy := PutAppendReply{}
+			ok := ck.servers[leader].Call("KVServer." + op, &args, &reply_copy)
+			if ok {
+				return_channel <- reply_copy
+			} else {
+				return_channel <- PutAppendReply{Err: "BadCall"}
+			}
+		}(ck.possible_leader)
+		go func(){
+			time.Sleep(150 * time.Millisecond)
+			timeout <- true
+		}()
 
-		if !ok || reply.Err != "" {
+		reply := PutAppendReply{Err: "Null"}
+		select {
+			case a := <- return_channel:
+				// a read from ch has occurred
+				reply = a
+			case <-timeout:
+				reply = PutAppendReply{Err: "Timeout"}
+		}
+
+		if reply.Err != "" {
 			ck.possible_leader = (ck.possible_leader + 1) % len(ck.servers)
 			continue
 		}

@@ -45,6 +45,8 @@ type KVServer struct {
 
 	//for an index, the channels that need to be alerted
 	alert_channels map[int][]chan raft.ApplyMsg
+
+	last_oper map[int64]int64 //clientId --> last operationId that succeeded
 }
 
 
@@ -70,7 +72,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.alert_channels[index] = append(existing_channel_list, alert_channel)
 	kv.mu.Unlock()
 	//if committed, return value
-	apply_msg :=<-alert_channel
+	apply_msg := <-alert_channel
 	kv.mu.Lock()
 
 	if apply_msg.CommandIndex != index {
@@ -83,6 +85,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	value := kv.map_vals[args.Key]
 	reply.Value = value
+
+	delete(kv.last_oper, args.ClientId)
 	// fmt.Printf("%d: Success! Get %s: %s\n", kv.me, args.Key, value)
 }
 
@@ -91,6 +95,9 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
+	if kv.last_oper[args.ClientId] == args.OperationId {
+		return
+	}
 	
 	index, _, isLeader := kv.rf.Start(Op{OpType: "Put", Key: args.Key, Value: args.Value, ClientId: args.ClientId, OperationId: args.OperationId})
 
@@ -119,6 +126,7 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = "DifferentThingCommitted"
 		return
 	}
+
 }
 
 func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
@@ -126,6 +134,9 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
+	if kv.last_oper[args.ClientId] == args.OperationId {
+		return
+	}
 	
 	index, _, isLeader := kv.rf.Start(Op{OpType: "Append", Key: args.Key, Value: args.Value, ClientId: args.ClientId, OperationId: args.OperationId})
 
@@ -168,9 +179,15 @@ func (kv *KVServer) applier() {
 			if op.OpType == "Get" {
 				//do nothing
 			} else if op.OpType == "Put" {
-				kv.map_vals[op.Key] = op.Value
+				if kv.last_oper[op.ClientId] != op.OperationId {
+					kv.map_vals[op.Key] = op.Value
+					kv.last_oper[op.ClientId] = op.OperationId
+				}
 			} else if op.OpType == "Append" {
-				kv.map_vals[op.Key] += op.Value
+				if kv.last_oper[op.ClientId] != op.OperationId {
+					kv.map_vals[op.Key] += op.Value
+					kv.last_oper[op.ClientId] = op.OperationId
+				}
 			}
 
 			// alert RPCs
@@ -230,6 +247,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.map_vals = make(map[string]string)
 	kv.alert_channels = make(map[int][]chan raft.ApplyMsg)
+	kv.last_oper = make(map[int64]int64)
 
 	// You may need initialization code here.
 	go kv.applier()
