@@ -1,9 +1,11 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"6.5840/labgob"
 	"6.5840/labrpc"
@@ -47,6 +49,9 @@ type KVServer struct {
 	alert_channels map[int][]chan raft.ApplyMsg
 
 	last_oper map[int64]int64 //clientId --> last operationId that succeeded
+
+	lastApplied int
+	persister *raft.Persister
 }
 
 
@@ -55,9 +60,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	
 	index, _, isLeader := kv.rf.Start(Op{OpType: "Get", Key: args.Key, ClientId: args.ClientId, OperationId: args.OperationId})
-
+	
 	if !isLeader{
 		reply.Err = "NotLeader"
 		return
@@ -189,6 +193,7 @@ func (kv *KVServer) applier() {
 					kv.last_oper[op.ClientId] = op.OperationId
 				}
 			}
+			kv.lastApplied = msg.CommandIndex
 
 			// alert RPCs
 			idx := msg.CommandIndex
@@ -197,8 +202,59 @@ func (kv *KVServer) applier() {
 					ch <- msg
 				}
 			}
+		} else {
+			if !msg.SnapshotValid {
+				panic("SnapshotValid should be true")
+			}
+			snapshot := msg.Snapshot
+			kv.restoreSnapshot(snapshot)
+			// kv.persist()
 		}
 		kv.mu.Unlock()
+	}
+}
+
+func (kv *KVServer) restoreSnapshot(kvstate []byte) {
+	if kvstate == nil || len(kvstate) < 1 { // bootstrap without any state?
+		return
+	}
+
+	r := bytes.NewBuffer(kvstate)
+	d := labgob.NewDecoder(r)
+	var map_vals map[string]string
+	var last_oper map[int64]int64
+	var lastApplied int
+
+	if d.Decode(&map_vals) != nil ||
+		d.Decode(&last_oper) != nil ||
+		d.Decode(&lastApplied) != nil {
+		panic("readPersist decode error")
+	} else {
+		kv.map_vals = map_vals
+		kv.last_oper = last_oper
+		kv.lastApplied = lastApplied
+	}
+}
+
+
+
+func (kv *KVServer) snapshotLoop() {
+	for{
+		kv.mu.Lock()
+		if kv.maxraftstate != -1 && float32(kv.persister.RaftStateSize()) > float32(kv.maxraftstate) * 0.75 {
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			e.Encode(kv.map_vals)
+			e.Encode(kv.last_oper)
+			e.Encode(kv.lastApplied)
+			kvstate := w.Bytes()
+			lastApplied := kv.lastApplied
+			kv.mu.Unlock()
+			kv.rf.Snapshot(lastApplied, kvstate)
+			kv.mu.Lock()
+		}
+		kv.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -250,7 +306,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.last_oper = make(map[int64]int64)
 
 	// You may need initialization code here.
+	kv.persister = persister
+	kv.restoreSnapshot(kv.persister.ReadSnapshot())
+
 	go kv.applier()
+	go kv.snapshotLoop()
 
 	return kv
 }
