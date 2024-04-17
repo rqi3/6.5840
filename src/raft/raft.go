@@ -31,6 +31,7 @@ import (
 	//	"bytes"
 
 	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -202,7 +203,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// fmt.Printf("%d: Snapshot. len(rf.log) = %d\n", rf.me, len(rf.log))
 	if index > rf.logStart {
 		rf.log = rf.log[index-rf.logStart:]
 		rf.logStart = index
@@ -349,6 +349,15 @@ type AppendEntriesReply struct {
 	XLen int
 }
 
+func (rf *Raft) printState(){
+	fmt.Printf("%d: PRINTING STATE\n", rf.me)
+	fmt.Printf("%d: log size: %d\n", rf.me, len(rf.log))
+	for i := 0; i < len(rf.log); i++ {
+		fmt.Printf("%d: %d %d %s\n", rf.me, rf.log[i].Term, rf.log[i].Index, rf.log[i].Command)
+	}
+	fmt.Printf("%d: votedFor: %d\n", rf.me, rf.votedFor)
+	fmt.Printf("%d: DONE PRINTING STATE\n", rf.me)
+}
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -357,7 +366,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.XTerm = -1
 	reply.XLen = -1
 
-	// fmt.Printf("%d: AppendEntries. Term: %d, Leader: %d\n", rf.me, args.Term, args.LeaderId)
+	// rf.printState()
+	
 
 	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
 	if args.Term > rf.currentTerm {
@@ -702,8 +712,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	if args.LastIncludedIndex < rf.logStart{
-		//somehow got a snapshot with lower lastIndex than currently has
-		panic("Not listed on InstallSnapshotRPC but maybe OK?")
+		//somehow got a snapshot with lower lastIndex than currently has. Maybe if message is delayed for a long time?
+		// panic("Not listed on InstallSnapshotRPC but maybe OK?")
 		return
 	}
 	rf.snapshotBytes = args.Data
@@ -851,6 +861,7 @@ func (rf *Raft) updateLogsTickers(term int){
 
 	for{
 		// fmt.Printf("%d: updateLogsTickers term = %d\n", rf.me, term)
+		// rf.printState()
 		for i := 0; i < len(rf.peers); i++{
 			if(i == rf.me){
 				continue
