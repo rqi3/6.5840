@@ -265,9 +265,9 @@ func (kv *KVServer) snapshotLoop() {
 			e.Encode(kv.lastApplied)
 			kvstate := w.Bytes()
 			lastApplied := kv.lastApplied
-			kv.mu.Unlock()
-			kv.rf.Snapshot(lastApplied, kvstate)
-			kv.mu.Lock()
+			// kv.mu.Unlock()
+			kv.rf.Snapshot(lastApplied, kvstate) //rqi: maybe suspicious we're unlocking here and not before rf.Start
+			// kv.mu.Lock()
 		}
 		kv.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
@@ -349,6 +349,14 @@ Could modify where we wait for command to be committed, instead check whether le
 - can handle this by calling GetState() every 10ms or so, and seeing if leader/term is the same. If remains the same for a long time, is fine. Then, can remove timeouts from the Client side. Actually, timeouts still needed in the case of dropped messages.
 
 the channels inside of alert_channels need to be removed from the map
+
+2 routines stuck on (just saying [chan receive]):
+https://github.com/rqi3/6.5840/blob/916e9a85ac59b152bb2e6e27504215f8c68b27bf/src/kvraft/server.go#L178
+
+5 routines stuck on: kv.mu.Lock()
+https://github.com/rqi3/6.5840/blob/916e9a85ac59b152bb2e6e27504215f8c68b27bf/src/kvraft/server.go#L179C3-L179C15
+
+7 routines stuck on: the starting lock of rf.Start().
 */
 
 /*
@@ -356,4 +364,6 @@ deal with 4B test later
 Test: ops complete fast enough (4B) ...
 --- FAIL: TestSpeed4B (17.71s)
     test_test.go:148: duplicate element x 0 918 y in Append result
+
+
 */
