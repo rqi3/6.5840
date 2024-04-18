@@ -54,6 +54,19 @@ type KVServer struct {
 	persister *raft.Persister
 }
 
+func (kv *KVServer) removeAlertChannel(index int, alertChannelToRemove chan raft.ApplyMsg) {
+    existingChannelList := kv.alert_channels[index]
+    updatedChannelList := make([]chan raft.ApplyMsg, 0)
+    for _, channel := range existingChannelList {
+        if channel != alertChannelToRemove {
+            updatedChannelList = append(updatedChannelList, channel)
+        }
+    }
+    kv.alert_channels[index] = updatedChannelList
+	if len(kv.alert_channels[index]) == 0 {
+		delete(kv.alert_channels, index)
+	}
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
@@ -78,6 +91,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	//if committed, return value
 	apply_msg := <-alert_channel
 	kv.mu.Lock()
+	kv.removeAlertChannel(index, alert_channel)
 
 	if apply_msg.CommandIndex != index {
 		panic("index mismatch")
@@ -121,6 +135,7 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	//if committed, return value
 	apply_msg := <-alert_channel
 	kv.mu.Lock()
+	kv.removeAlertChannel(index, alert_channel)
 
 	if apply_msg.CommandIndex != index {
 		panic("index mismatch")
@@ -160,6 +175,7 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	//if committed, return value
 	apply_msg := <-alert_channel
 	kv.mu.Lock()
+	kv.removeAlertChannel(index, alert_channel)
 
 	if apply_msg.CommandIndex != index {
 		panic("index mismatch")
@@ -314,3 +330,30 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	return kv
 }
+
+/*
+Test: unreliable net, restarts, partitions, random keys, many clients (4A) ...
+panic: test timed out after 10m0s
+running tests:
+	TestPersistPartitionUnreliableLinearizable4A (5m51s)
+
+goroutine 2333069 [running]:...
+
+I think deadlock ^, possibly caused by waiting for rf.Start() to return, 
+
+Additionally, are you unlocking in your RPC handler while you wait for the command to go through Raft? (https://piazza.com/class/ls556rjxqbi2ie/post/385)
+
+Your solution needs to handle a leader that has called Start() for a Clerk's RPC, but loses its leadership before the request is committed to the log. In this case you should arrange for the Clerk to re-send the request to other servers until it finds the new leader. One way to do this is for the server to detect that it has lost leadership, by noticing that Raft's term has changed or a different request has appeared at the index returned by Start(). If the ex-leader is partitioned by itself, it won't know about new leaders; but any client in the same partition won't be able to talk to a new leader either, so it's OK in this case for the server and client to wait indefinitely until the partition heals.
+
+Could modify where we wait for command to be committed, instead check whether leadership has changed.
+- can handle this by calling GetState() every 10ms or so, and seeing if leader/term is the same. If remains the same for a long time, is fine. Then, can remove timeouts from the Client side. Actually, timeouts still needed in the case of dropped messages.
+
+the channels inside of alert_channels need to be removed from the map
+*/
+
+/*
+deal with 4B test later
+Test: ops complete fast enough (4B) ...
+--- FAIL: TestSpeed4B (17.71s)
+    test_test.go:148: duplicate element x 0 918 y in Append result
+*/
