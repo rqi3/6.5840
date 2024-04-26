@@ -198,6 +198,7 @@ func (kv *KVServer) applier() {
 			// fmt.Printf("%d: Apply %s %s %s\n", kv.me, op.OpType, op.Key, op.Value)
 			if op.OpType == "Get" {
 				//do nothing
+				// rqi 4/25: maybe should move delete(kv.last_oper) to here? probably doens't matter
 			} else if op.OpType == "Put" {
 				if kv.last_oper[op.ClientId] != op.OperationId {
 					kv.map_vals[op.Key] = op.Value
