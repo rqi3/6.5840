@@ -1,7 +1,6 @@
 package shardctrler
 
 import (
-	"fmt"
 	"strconv"
 	"sync"
 
@@ -10,7 +9,10 @@ import (
 	"6.5840/raft"
 )
 
-
+type ShardCtrlerApplyMsg struct {
+	raft_apply_msg raft.ApplyMsg
+	new_config Config
+}
 type ShardCtrler struct {
 	mu      sync.Mutex
 	me      int
@@ -22,7 +24,7 @@ type ShardCtrler struct {
 	configs []Config // indexed by config num
 
 	//for an index, the channels that need to be alerted
-	alert_channels map[int][]chan raft.ApplyMsg
+	alert_channels map[int][]chan ShardCtrlerApplyMsg
 
 	last_oper map[int64]int64 //clientId --> last operationId that succeeded
 
@@ -33,11 +35,18 @@ type ShardCtrler struct {
 type Op struct {
 	// Your data here.
 	OpType string
-	ConfigsIndex int
-	NewConfig Config
 	ClientId int64
 	OperationId int64
-	Num int // for query
+
+	//Join
+	Servers map[int][]string
+	//Leave
+	GIDs []int
+	//Move
+	Shard int
+	GID   int
+	//Query
+	Num int
 }
 
 func configCopy(config Config) Config {
@@ -55,9 +64,9 @@ func configCopy(config Config) Config {
 	return result
 }
 
-func (sc *ShardCtrler) removeAlertChannel(index int, alertChannelToRemove chan raft.ApplyMsg) {
+func (sc *ShardCtrler) removeAlertChannel(index int, alertChannelToRemove chan ShardCtrlerApplyMsg) {
     existingChannelList := sc.alert_channels[index]
-    updatedChannelList := make([]chan raft.ApplyMsg, 0)
+    updatedChannelList := make([]chan ShardCtrlerApplyMsg, 0)
     for _, channel := range existingChannelList {
         if channel != alertChannelToRemove {
             updatedChannelList = append(updatedChannelList, channel)
@@ -67,41 +76,6 @@ func (sc *ShardCtrler) removeAlertChannel(index int, alertChannelToRemove chan r
 	if len(sc.alert_channels[index]) == 0 {
 		delete(sc.alert_channels, index)
 	}
-}
-
-func (sc *ShardCtrler) attemptModifyConfig(new_config Config, client_id int64, operation_id int64) string {
-	index, _, isLeader := sc.rf.Start(Op{
-		OpType: "ConfigChange",
-		ConfigsIndex: len(sc.configs), 
-		NewConfig: new_config,
-		ClientId: client_id, 
-		OperationId: operation_id,
-	})
-	
-	if !isLeader{
-		return "NotLeader"
-	}
-
-	alert_channel := make(chan raft.ApplyMsg, 1)
-	existing_channel_list := make([]chan raft.ApplyMsg, 0)
-	if sc.alert_channels[index] != nil {
-		existing_channel_list = sc.alert_channels[index]
-	}
-	sc.alert_channels[index] = append(existing_channel_list, alert_channel)
-	sc.mu.Unlock()
-	apply_msg := <-alert_channel
-	sc.mu.Lock()
-	sc.removeAlertChannel(index, alert_channel)
-
-	if apply_msg.CommandIndex != index {
-		panic("index mismatch")
-	}
-
-	if apply_msg.Command.(Op).OperationId != operation_id {
-		return "DifferentThingCommitted"
-	}
-
-	return "Success"
 }
 
 func rebalanceShards(config Config) [NShards]int {
@@ -211,33 +185,35 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 		return
 	}
 
-	new_config := configCopy(sc.configs[len(sc.configs) - 1])
-	//go through new shards in increasing order, assign to lowest num shards 
-	for gid := range args.Servers {
-		if _, ok := new_config.Groups[gid]; ok {
-			panic("Gid already exists in config!")
-		}
-		new_config.Groups[gid] = args.Servers[gid]
-	}
-	new_config.Shards = rebalanceShards(new_config) //old config, extra shard indices
-	status := sc.attemptModifyConfig(new_config, args.ClientId, args.OperationId)
-	if status == "Success" {
-		return
-	} 
-
-	if status == "NotLeader" {
-		reply.WrongLeader = true
-		reply.Err = "Test"
-		reply.Err = Err(status)
-		return
+	index, _, isLeader := sc.rf.Start(Op{
+		OpType: "Join",
+		Servers: args.Servers,
+		ClientId: args.ClientId, 
+		OperationId: args.OperationId,
+	})
+	
+	if !isLeader{
+		reply.Err = "NotLeader"
 	}
 
-	if status != "DifferentThingCommitted" {
-		panic("Unexpected status: " + status)
+	alert_channel := make(chan ShardCtrlerApplyMsg, 1)
+	existing_channel_list := make([]chan ShardCtrlerApplyMsg, 0)
+	if sc.alert_channels[index] != nil {
+		existing_channel_list = sc.alert_channels[index]
+	}
+	sc.alert_channels[index] = append(existing_channel_list, alert_channel)
+	sc.mu.Unlock()
+	apply_msg := <-alert_channel
+	sc.mu.Lock()
+	sc.removeAlertChannel(index, alert_channel)
+
+	if apply_msg.raft_apply_msg.CommandIndex != index {
+		panic("index mismatch")
 	}
 
-	reply.Err = Err(status)
-	return
+	if apply_msg.raft_apply_msg.Command.(Op).OperationId != args.OperationId {
+		reply.Err = "DifferentThingCommitted"
+	}
 }
 
 func contains(s []int, x int) bool {
@@ -258,41 +234,40 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	if sc.last_oper[args.ClientId] == args.OperationId {
 		return
 	}
-
-	new_config := configCopy(sc.configs[len(sc.configs) - 1])
-	//go through new shards in increasing order, assign to lowest num shards
 	
-	for i := 0; i < NShards; i++ {
-		if contains(args.GIDs, new_config.Shards[i]){
-			new_config.Shards[i] = 0
-		}
-	}
-	for _, gid := range args.GIDs {
-		delete(new_config.Groups, gid)
-	}
-
-	new_config.Shards = rebalanceShards(new_config) //old config, extra shard indices
+	index, _, isLeader := sc.rf.Start(Op{
+		OpType: "Leave",
+		GIDs: args.GIDs,
+		ClientId: args.ClientId, 
+		OperationId: args.OperationId,
+	})
 	
-	status := sc.attemptModifyConfig(new_config, args.ClientId, args.OperationId)
-	if status == "Success" {
-		return
-	} 
-
-	if status == "NotLeader" {
-		reply.WrongLeader = true
-		reply.Err = Err(status)
-		return
+	if !isLeader{
+		reply.Err = "NotLeader"
 	}
 
-	if status != "DifferentThingCommitted" {
-		panic("Unexpected status: " + status)
+	alert_channel := make(chan ShardCtrlerApplyMsg, 1)
+	existing_channel_list := make([]chan ShardCtrlerApplyMsg, 0)
+	if sc.alert_channels[index] != nil {
+		existing_channel_list = sc.alert_channels[index]
+	}
+	sc.alert_channels[index] = append(existing_channel_list, alert_channel)
+	sc.mu.Unlock()
+	apply_msg := <-alert_channel
+	sc.mu.Lock()
+	sc.removeAlertChannel(index, alert_channel)
+
+	if apply_msg.raft_apply_msg.CommandIndex != index {
+		panic("index mismatch")
 	}
 
-	reply.Err = Err(status)
-	return
+	if apply_msg.raft_apply_msg.Command.(Op).OperationId != args.OperationId {
+		reply.Err = "DifferentThingCommitted"
+	}
 }
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
+	// Your code here.
 	// Your code here.
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
@@ -300,69 +275,74 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	if sc.last_oper[args.ClientId] == args.OperationId {
 		return
 	}
-
-	new_config := configCopy(sc.configs[len(sc.configs) - 1])
-	//go through new shards in increasing order, assign to lowest num shards
-	new_config.Shards[args.Shard] = args.GID
-	status := sc.attemptModifyConfig(new_config, args.ClientId, args.OperationId)
-	if status == "Success" {
-		return
-	} 
-
-	if status == "NotLeader" {
-		reply.WrongLeader = true
-		reply.Err = Err(status)
-		return
-	}
-
-	if status != "DifferentThingCommitted" {
-		panic("Unexpected status: " + status)
-	}
-
-	reply.Err = Err(status)
-	return
-}
-
-func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
-	// fmt.Printf("%d: Query args: %v\n", sc.me, args)
-	// Your code here.
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-
-	actual_args_num := args.Num
-	if actual_args_num == -1 || actual_args_num >= len(sc.configs) {
-		actual_args_num = len(sc.configs) - 1
-	}
 	
-	index, _, isLeader := sc.rf.Start(Op{OpType: "Query", Num: actual_args_num, ClientId: args.ClientId, OperationId: args.OperationId})
+	index, _, isLeader := sc.rf.Start(Op{
+		OpType: "Move",
+		GID: args.GID,
+		Shard: args.Shard,
+		ClientId: args.ClientId, 
+		OperationId: args.OperationId,
+	})
 	
 	if !isLeader{
 		reply.Err = "NotLeader"
-		return
 	}
-	// wait for committed
-	alert_channel := make(chan raft.ApplyMsg, 1)
 
-	existing_channel_list := make([]chan raft.ApplyMsg, 0)
+	alert_channel := make(chan ShardCtrlerApplyMsg, 1)
+	existing_channel_list := make([]chan ShardCtrlerApplyMsg, 0)
 	if sc.alert_channels[index] != nil {
 		existing_channel_list = sc.alert_channels[index]
 	}
 	sc.alert_channels[index] = append(existing_channel_list, alert_channel)
 	sc.mu.Unlock()
-	//if committed, return value
 	apply_msg := <-alert_channel
 	sc.mu.Lock()
 	sc.removeAlertChannel(index, alert_channel)
 
-	if apply_msg.CommandIndex != index {
+	if apply_msg.raft_apply_msg.CommandIndex != index {
 		panic("index mismatch")
 	}
 
-	if apply_msg.Command.(Op).OperationId != args.OperationId {
+	if apply_msg.raft_apply_msg.Command.(Op).OperationId != args.OperationId {
 		reply.Err = "DifferentThingCommitted"
-		return
 	}
-	value := sc.configs[actual_args_num]
+}
+
+func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
+	// Your code here.
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	
+	index, _, isLeader := sc.rf.Start(Op{
+		OpType: "Query",
+		Num: args.Num,
+		ClientId: args.ClientId, 
+		OperationId: args.OperationId,
+	})
+	
+	if !isLeader{
+		reply.Err = "NotLeader"
+	}
+
+	alert_channel := make(chan ShardCtrlerApplyMsg, 1)
+	existing_channel_list := make([]chan ShardCtrlerApplyMsg, 0)
+	if sc.alert_channels[index] != nil {
+		existing_channel_list = sc.alert_channels[index]
+	}
+	sc.alert_channels[index] = append(existing_channel_list, alert_channel)
+	sc.mu.Unlock()
+	apply_msg := <-alert_channel
+	sc.mu.Lock()
+	sc.removeAlertChannel(index, alert_channel)
+
+	if apply_msg.raft_apply_msg.CommandIndex != index {
+		panic("index mismatch")
+	}
+
+	if apply_msg.raft_apply_msg.Command.(Op).OperationId != args.OperationId {
+		reply.Err = "DifferentThingCommitted"
+	}
+	value := apply_msg.new_config
 	reply.Config = value
 
 	delete(sc.last_oper, args.ClientId)
@@ -374,18 +354,59 @@ func (sc *ShardCtrler) applier() {
 		sc.mu.Lock()
 		if msg.CommandValid {
 			op := msg.Command.(Op)
-			fmt.Printf("%d: Apply %v\n", sc.me, op)
-			if op.OpType == "ConfigChange" {
+			// fmt.Printf("%d: Apply %v\n", sc.me, op)
+			new_config := Config{}
+			if op.OpType == "Join" {
 				if sc.last_oper[op.ClientId] != op.OperationId {
-					if op.ConfigsIndex != len(sc.configs) {
-						panic("Unexpected ConfigsIndex: " + strconv.Itoa(op.ConfigsIndex) + " vs " + strconv.Itoa(len(sc.configs)))
+					new_config := configCopy(sc.configs[len(sc.configs) - 1])
+					new_config.Num += 1
+					//go through new shards in increasing order, assign to lowest num shards 
+					for gid := range op.Servers {
+						if _, ok := new_config.Groups[gid]; ok {
+							panic("Gid already exists in config!")
+						}
+						new_config.Groups[gid] = op.Servers[gid]
 					}
-					sc.configs = append(sc.configs, op.NewConfig)
+					new_config.Shards = rebalanceShards(new_config)
+					sc.configs = append(sc.configs, new_config)
 					sc.last_oper[op.ClientId] = op.OperationId
-					fmt.Printf("%d: At Config Idx %d New Config %v\n", sc.me, op.ConfigsIndex, op.NewConfig)
+				}
+			} else if op.OpType == "Leave" {
+				if sc.last_oper[op.ClientId] != op.OperationId {
+					new_config := configCopy(sc.configs[len(sc.configs) - 1])
+					new_config.Num += 1
+					//go through new shards in increasing order, assign to lowest num shards
+					for i := 0; i < NShards; i++ {
+						if contains(op.GIDs, new_config.Shards[i]){
+							new_config.Shards[i] = 0
+						}
+					}
+					for _, gid := range op.GIDs {
+						if _, ok := new_config.Groups[gid]; !ok {
+							panic("Gid does not exist in config!")
+						}
+						delete(new_config.Groups, gid)
+					}
+					new_config.Shards = rebalanceShards(new_config) //old config, extra shard indices
+					sc.configs = append(sc.configs, new_config)
+					sc.last_oper[op.ClientId] = op.OperationId
+				}
+			} else if op.OpType == "Move" {
+				if sc.last_oper[op.ClientId] != op.OperationId {
+					new_config := configCopy(sc.configs[len(sc.configs) - 1])
+					new_config.Num += 1
+
+					new_config.Shards[op.Shard] = op.GID
+					sc.configs = append(sc.configs, new_config)
+					sc.last_oper[op.ClientId] = op.OperationId
 				}
 			} else if op.OpType == "Query" {
-				//do nothing
+				if op.Num == -1 || op.Num >= len(sc.configs) {
+					new_config = sc.configs[len(sc.configs)-1]
+				} else {
+					new_config = sc.configs[op.Num]
+				}
+				
 			} else {
 				panic("Unexpected OpType: " + op.OpType)
 			}
@@ -395,9 +416,14 @@ func (sc *ShardCtrler) applier() {
 			idx := msg.CommandIndex
 			if sc.alert_channels[idx] != nil {
 				for _, ch := range sc.alert_channels[idx] {
-					ch <- msg
+					ch <- ShardCtrlerApplyMsg{
+						raft_apply_msg: msg,
+						new_config: new_config,
+					}
 				}
 			}
+			// fmt.Printf("%d: NUM CONFIGS: %d\n", sc.me, len(sc.configs))
+			// fmt.Printf("%d: RESULTING CONFIG is %v\n", sc.me, sc.configs[len(sc.configs) - 1])
 		} else {
 			panic("Unexpected msg.CommandValid: " + strconv.FormatBool(msg.CommandValid))
 		}
@@ -441,7 +467,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 		sc.configs[0].Shards[i] = 0
 	}
 
-	sc.alert_channels = make(map[int][]chan raft.ApplyMsg)
+	sc.alert_channels = make(map[int][]chan ShardCtrlerApplyMsg)
 	sc.last_oper = make(map[int64]int64)
 
 	go sc.applier()
@@ -451,7 +477,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 
 /*
-duplicate operation should be replied with success (in this lab and last)
 config changes should be made after committing
 
 */
