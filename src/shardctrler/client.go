@@ -4,14 +4,18 @@ package shardctrler
 // Shardctrler clerk.
 //
 
-import "6.5840/labrpc"
-import "time"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+	"time"
+
+	"6.5840/labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	client_id int64
 }
 
 func nrand() int64 {
@@ -25,77 +29,179 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.client_id = nrand()
 	return ck
 }
 
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
-	// Your code here.
-	args.Num = num
+	operation_id := nrand()
+	possible_leader := 0
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply QueryReply
-			ok := srv.Call("ShardCtrler.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return reply.Config
+		return_channel := make(chan QueryReply, 1)
+		timeout := make(chan bool, 1)
+		go func(leader int) {
+			args := QueryArgs{
+				Num: num,
+				ClientId: ck.client_id,
+				OperationId: operation_id,
 			}
+			reply_copy := QueryReply{}
+			ok := ck.servers[leader].Call("ShardCtrler.Query", &args, &reply_copy)
+			if ok {
+				return_channel <- reply_copy
+			} else {
+				return_channel <- QueryReply{Err: "BadCall"}
+			}
+		}(possible_leader)
+		go func(){
+			time.Sleep(150 * time.Millisecond)
+			timeout <- true
+		}()
+
+		reply := QueryReply{Err: "Null"}
+		select {
+			case a := <- return_channel:
+				// a read from ch has occurred
+				reply = a
+			case <-timeout:
+				reply = QueryReply{Err: "Timeout"}
 		}
-		time.Sleep(100 * time.Millisecond)
+
+		if reply.Err != "" {
+			possible_leader = (possible_leader + 1) % len(ck.servers)
+			continue
+		}
+		// fmt.Printf("Success %s %s %s\n", key, value, op)
+		return reply.Config//success!
 	}
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
-	// Your code here.
-	args.Servers = servers
-
+	operation_id := nrand()
+	possible_leader := 0
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply JoinReply
-			ok := srv.Call("ShardCtrler.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
+		return_channel := make(chan JoinReply, 1)
+		timeout := make(chan bool, 1)
+		go func(leader int) {
+			args := JoinArgs{
+				Servers: servers,
+				ClientId: ck.client_id,
+				OperationId: operation_id,
 			}
+			reply_copy := JoinReply{}
+			ok := ck.servers[leader].Call("ShardCtrler.Join", &args, &reply_copy)
+			if ok {
+				return_channel <- reply_copy
+			} else {
+				return_channel <- JoinReply{Err: "BadCall"}
+			}
+		}(possible_leader)
+		go func(){
+			time.Sleep(150 * time.Millisecond)
+			timeout <- true
+		}()
+
+		reply := JoinReply{Err: "Null"}
+		select {
+			case a := <- return_channel:
+				// a read from ch has occurred
+				reply = a
+			case <-timeout:
+				reply = JoinReply{Err: "Timeout"}
 		}
-		time.Sleep(100 * time.Millisecond)
+
+		if reply.Err != "" {
+			possible_leader = (possible_leader + 1) % len(ck.servers)
+			continue
+		}
+		// fmt.Printf("Success %s %s %s\n", key, value, op)
+		return //success!
 	}
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
-	// Your code here.
-	args.GIDs = gids
-
+	operation_id := nrand()
+	possible_leader := 0
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply LeaveReply
-			ok := srv.Call("ShardCtrler.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
+		return_channel := make(chan LeaveReply, 1)
+		timeout := make(chan bool, 1)
+		go func(leader int) {
+			args := LeaveArgs{
+				GIDs: gids,
+				ClientId: ck.client_id,
+				OperationId: operation_id,
 			}
+			reply_copy := LeaveReply{}
+			ok := ck.servers[leader].Call("ShardCtrler.Leave", &args, &reply_copy)
+			if ok {
+				return_channel <- reply_copy
+			} else {
+				return_channel <- LeaveReply{Err: "BadCall"}
+			}
+		}(possible_leader)
+		go func(){
+			time.Sleep(150 * time.Millisecond)
+			timeout <- true
+		}()
+
+		reply := LeaveReply{Err: "Null"}
+		select {
+			case a := <- return_channel:
+				// a read from ch has occurred
+				reply = a
+			case <-timeout:
+				reply = LeaveReply{Err: "Timeout"}
 		}
-		time.Sleep(100 * time.Millisecond)
+
+		if reply.Err != "" {
+			possible_leader = (possible_leader + 1) % len(ck.servers)
+			continue
+		}
+		// fmt.Printf("Success %s %s %s\n", key, value, op)
+		return //success!
 	}
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
-	// Your code here.
-	args.Shard = shard
-	args.GID = gid
-
+	operation_id := nrand()
+	possible_leader := 0
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply MoveReply
-			ok := srv.Call("ShardCtrler.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
+		return_channel := make(chan MoveReply, 1)
+		timeout := make(chan bool, 1)
+		go func(leader int) {
+			args := MoveArgs{
+				Shard: shard,
+				GID: gid,
+				ClientId: ck.client_id,
+				OperationId: operation_id,
 			}
+			reply_copy := MoveReply{}
+			ok := ck.servers[leader].Call("ShardCtrler.Move", &args, &reply_copy)
+			if ok {
+				return_channel <- reply_copy
+			} else {
+				return_channel <- MoveReply{Err: "BadCall"}
+			}
+		}(possible_leader)
+		go func(){
+			time.Sleep(150 * time.Millisecond)
+			timeout <- true
+		}()
+
+		reply := MoveReply{Err: "Null"}
+		select {
+			case a := <- return_channel:
+				// a read from ch has occurred
+				reply = a
+			case <-timeout:
+				reply = MoveReply{Err: "Timeout"}
 		}
-		time.Sleep(100 * time.Millisecond)
+
+		if reply.Err != "" {
+			possible_leader = (possible_leader + 1) % len(ck.servers)
+			continue
+		}
+		// fmt.Printf("Success %s %s %s\n", key, value, op)
+		return //success!
 	}
 }
