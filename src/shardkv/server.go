@@ -1,6 +1,7 @@
 package shardkv
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -9,8 +10,6 @@ import (
 	"6.5840/raft"
 	"6.5840/shardctrler"
 )
-
-
 
 type Op struct {
 	// Your definitions here.
@@ -21,6 +20,11 @@ type Op struct {
 	Value string
 	ClientId int64
 	OperationId int64
+	NewConfig shardctrler.Config
+
+	ShardId int
+	NewConfigNum int
+	ShardData map[string]string
 }
 
 type ShardKV struct {
@@ -44,7 +48,14 @@ type ShardKV struct {
 	lastApplied int
 
 	mck *shardctrler.Clerk
-	last_known_config shardctrler.Config
+
+	serving_shards map[int]struct{} //which shards is this server serving
+
+	//currently going from old_config to new_config, need to import and export these remaining shards
+	old_config shardctrler.Config
+	new_config shardctrler.Config
+	shards_to_import map[int]int
+	shards_to_export map[int]int
 }
 
 func (kv *ShardKV) removeAlertChannel(index int, alertChannelToRemove chan raft.ApplyMsg) {
@@ -61,12 +72,17 @@ func (kv *ShardKV) removeAlertChannel(index int, alertChannelToRemove chan raft.
 	}
 }
 
+func (kv *ShardKV) addAlertChannel(index int, alertChannelToAdd chan raft.ApplyMsg) {
+	existingChannelList := kv.alert_channels[index]
+	updatedChannelList := append(existingChannelList, alertChannelToAdd)
+	kv.alert_channels[index] = updatedChannelList
+}
+
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-
-	if kv.last_known_config.Shards[key2shard(args.Key)] != kv.gid {
+	if _, ok := kv.serving_shards[key2shard(args.Key)]; ok {
 		reply.Err = "ErrWrongGroup"
 		return
 	}
@@ -80,11 +96,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// wait for committed
 	alert_channel := make(chan raft.ApplyMsg, 1)
 
-	existing_channel_list := make([]chan raft.ApplyMsg, 0)
-	if kv.alert_channels[index] != nil {
-		existing_channel_list = kv.alert_channels[index]
-	}
-	kv.alert_channels[index] = append(existing_channel_list, alert_channel)
+	kv.addAlertChannel(index, alert_channel)
 	kv.mu.Unlock()
 	//if committed, return value
 	apply_msg := <-alert_channel
@@ -111,7 +123,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	if kv.last_known_config.Shards[key2shard(args.Key)] != kv.gid {
+	if kv.new_config.Shards[key2shard(args.Key)] != kv.gid {
 		reply.Err = "ErrWrongGroup"
 		return
 	}
@@ -129,11 +141,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// wait for committed
 	alert_channel := make(chan raft.ApplyMsg, 1)
 
-	existing_channel_list := make([]chan raft.ApplyMsg, 0)
-	if kv.alert_channels[index] != nil {
-		existing_channel_list = kv.alert_channels[index]
-	}
-	kv.alert_channels[index] = append(existing_channel_list, alert_channel)
+	kv.addAlertChannel(index, alert_channel)
 	kv.mu.Unlock()
 	//if committed, return value
 	apply_msg := <-alert_channel
@@ -159,6 +167,150 @@ func (kv *ShardKV) Kill() {
 	// Your code here, if desired.
 }
 
+type ExportShardArgs struct{
+	ShardId int
+	NewConfigNum int
+	ShardData map[string]string
+}
+
+type ExportShardReply struct {
+	Err string
+}
+
+func copyShardData(shard_data map[string]string) map[string]string {
+	new_shard_data := make(map[string]string)
+	for key, val := range shard_data {
+		new_shard_data[key] = val
+	}
+	return new_shard_data
+}
+
+func configCopy(config shardctrler.Config) shardctrler.Config {
+	result := shardctrler.Config{
+		Num:    config.Num,
+		Shards: config.Shards,
+		Groups: make(map[int][]string),
+	}
+	for gid, servers := range config.Groups {
+		result.Groups[gid] = make([]string, 0)
+		result.Groups[gid] = append(result.Groups[gid], servers...) 
+	}
+	return result
+}
+
+func (kv *ShardKV) ExportShardRPC(args *ExportShardArgs, reply *ExportShardReply) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if args.NewConfigNum < kv.new_config.Num {
+		reply.Err = "Success" //already applied this shard import!
+		return
+	}
+
+	if args.NewConfigNum > kv.new_config.Num {
+		reply.Err = "ConfigFuture"
+		return
+	}
+
+	_, ok := kv.shards_to_import[args.ShardId]
+	if !ok {
+		reply.Err = "Success" //already imported this shard
+		return
+	}
+
+	operation_id := nrand()
+	shard_data := copyShardData(args.ShardData)
+	index, _, isLeader := kv.rf.Start(Op{OpType: "ShardImport", OperationId: operation_id, ShardId: args.ShardId, NewConfigNum: args.NewConfigNum, ShardData: shard_data})
+	if !isLeader {
+		reply.Err = "NotLeader"
+		return
+	}
+	// wait for committed
+	alert_channel := make(chan raft.ApplyMsg, 1)
+
+	kv.addAlertChannel(index, alert_channel)
+	kv.mu.Unlock()
+	//if committed, return value
+	apply_msg := <-alert_channel
+	kv.mu.Lock()
+	kv.removeAlertChannel(index, alert_channel)
+
+	if apply_msg.CommandIndex != index {
+		panic("index mismatch")
+	}
+
+	if apply_msg.Command.(Op).OperationId != operation_id {
+		reply.Err = "DifferentThingCommitted"
+		return
+	}
+
+	reply.Err = "Success"
+}
+
+func (kv *ShardKV) exportShard(new_config_num int, shard_id int) {
+	fmt.Printf("exporting shard %d\n", shard_id)
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	shard_data := make(map[string]string)
+	for key, val := range kv.map_vals {
+		if key2shard(key) == shard_id {
+			shard_data[key] = val
+		}
+	}
+
+	done := false
+	for{
+		if kv.new_config.Num != new_config_num {
+			panic("config number weird")
+		}
+		if servers, ok := kv.new_config.Groups[kv.shards_to_export[shard_id]]; ok {
+			// try each server for the shard.
+			return_channel := make(chan bool, len(servers))
+			timeout := make(chan bool, 1)
+			args := []ExportShardArgs{}
+			for si := 0; si < len(servers); si++ {
+				args = append(args, ExportShardArgs{ShardId: shard_id, NewConfigNum: new_config_num, ShardData: copyShardData(shard_data)})
+			}
+			srvs := []*labrpc.ClientEnd{}
+			for si := 0; si < len(servers); si++ {
+				srvs = append(srvs, kv.make_end(servers[si]))
+			}
+			for si := 0; si < len(servers); si++ {
+				srv := srvs[si]
+				go func(args ExportShardArgs){
+					reply := ExportShardReply{}
+					ok := srv.Call("ShardKV.ExportShardRPC", &args, &reply)
+
+					if ok && reply.Err == "Success" {
+						return_channel <- true
+					}
+				}(args[si])
+			}
+			go func(){
+				time.Sleep(150 * time.Millisecond)
+				timeout <- true
+			}()
+
+			kv.mu.Unlock()
+			select {
+				case <- return_channel:
+					// a read from ch has occurred
+					done = true
+				case <- timeout:
+					// nothing
+			}
+			kv.mu.Lock()
+			if done {
+				break
+			}
+		} else {
+			//print kv.shards_to_export[shard_id]
+			// fmt.Printf("Group does not exist for shard %d %d\n", shard_id, kv.shards_to_export[shard_id])
+			panic("Weid, group does not exist?")
+		}
+	}
+
+}
 
 func (kv *ShardKV) applier() {
 	for{
@@ -166,29 +318,87 @@ func (kv *ShardKV) applier() {
 		kv.mu.Lock()
 		if msg.CommandValid {
 			op := msg.Command.(Op)
-			// fmt.Printf("%d: Apply %s %s %s\n", kv.me, op.OpType, op.Key, op.Value)
-			if op.OpType == "Get" {
-				//do nothing
-				// rqi 4/25: maybe should move delete(kv.last_oper) to here? probably doens't matter
-			} else if op.OpType == "Put" {
-				if kv.last_oper[op.ClientId] != op.OperationId {
-					kv.map_vals[op.Key] = op.Value
-					kv.last_oper[op.ClientId] = op.OperationId
+			fmt.Printf("%d: Apply %s %s %s\n", kv.me, op.OpType, op.Key, op.Value)
+			if op.OpType == "Get" || op.OpType == "Put" || op.OpType == "Append" {
+				if op.OpType == "Get" {
+					//do nothing
+					// rqi 4/25: maybe should move delete(kv.last_oper) to here? probably doens't matter
+				} else if op.OpType == "Put" {
+					if kv.last_oper[op.ClientId] != op.OperationId {
+						kv.map_vals[op.Key] = op.Value
+						kv.last_oper[op.ClientId] = op.OperationId
+					}
+				} else if op.OpType == "Append" {
+					if kv.last_oper[op.ClientId] != op.OperationId {
+						kv.map_vals[op.Key] += op.Value
+						kv.last_oper[op.ClientId] = op.OperationId
+					}
 				}
-			} else if op.OpType == "Append" {
-				if kv.last_oper[op.ClientId] != op.OperationId {
-					kv.map_vals[op.Key] += op.Value
-					kv.last_oper[op.ClientId] = op.OperationId
-				}
-			}
-			kv.lastApplied = msg.CommandIndex
+				kv.lastApplied = msg.CommandIndex
+				
+			} else if op.OpType == "Seal" {
+				if op.NewConfig.Num == kv.new_config.Num {
+					//already processed
+				} else {
+					if op.NewConfig.Num != kv.new_config.Num+1 {
+						panic("op.NewConfig.Num != kv.new_config.Num+1")
+					}
+					// wait for shard imports and exports to finish
+					waiting := 0
+					for len(kv.shards_to_export) > 0 || len(kv.shards_to_import) > 0 {
+						time.Sleep(10 * time.Millisecond)
+						waiting += 1
+						if waiting > 1000 {
+							panic("waiting > 1000") // maybe can remove this, but helpful for debug
+						}
+					}
 
-			// alert RPCs
-			idx := msg.CommandIndex
-			if kv.alert_channels[idx] != nil {
-				for _, ch := range kv.alert_channels[idx] {
-					ch <- msg
+					kv.old_config = kv.new_config
+					kv.new_config = configCopy(op.NewConfig)
+					fmt.Printf("%d: kv.old_config: %+v\n", kv.me, kv.old_config)
+					fmt.Printf("%d: kv.new_config: %+v\n", kv.me, kv.new_config)
+
+					//figure out which shards to import, export
+					for i := 0; i < shardctrler.NShards; i++ {
+						old_gid := kv.old_config.Shards[i]
+						new_gid := kv.new_config.Shards[i]
+						if new_gid == kv.gid && old_gid != kv.gid{
+							//import shard
+							if old_gid == 0 {
+								//starting to serve shard
+								kv.serving_shards[i] = struct{}{}
+							} else {
+								kv.shards_to_import[i] = old_gid
+							}
+							
+						} else if new_gid != kv.gid && old_gid == kv.gid {
+							//export shard
+							fmt.Printf("Exporting shard %d\n", i)
+							kv.shards_to_export[i] = new_gid
+							delete(kv.serving_shards, i)
+						}
+					} 
+
+					// start goroutines to export shards
+					for shard_id := range kv.shards_to_export {
+						go kv.exportShard(kv.new_config.Num, shard_id)
+					}
 				}
+			} else if op.OpType == "ShardImport" {
+				// receiving a shard import
+				if op.NewConfigNum != kv.new_config.Num {	
+					panic("Bad config num!")
+				}
+
+				for key, value := range op.ShardData {
+					kv.map_vals[key] = value
+				}
+				
+				_, ok := kv.shards_to_import[op.ShardId]
+				if ok {
+					delete(kv.shards_to_import, op.ShardId)
+				}
+				kv.serving_shards[op.ShardId] = struct{}{}
 			}
 		} else {
 			// if !msg.SnapshotValid {
@@ -198,15 +408,42 @@ func (kv *ShardKV) applier() {
 			// kv.restoreSnapshot(snapshot)
 			// kv.persist()
 		}
+
+		// alert RPCs
+		idx := msg.CommandIndex
+		if kv.alert_channels[idx] != nil {
+			for _, ch := range kv.alert_channels[idx] {
+				ch <- msg
+			}
+		}
 		kv.mu.Unlock()
 	}
 }
 
 func (kv *ShardKV) updateConfig(){
 	for{
-		config := kv.mck.Query(-1)
 		kv.mu.Lock()
-		kv.last_known_config = config
+		config := kv.mck.Query(kv.new_config.Num+1) //is this safe? query could take a long time. But otherwise data race on kv.mck?
+
+		if config.Num == kv.new_config.Num+1 {
+			operation_id := nrand()
+			index, _, isLeader := kv.rf.Start(Op{OpType: "Seal", OperationId: operation_id, NewConfig: configCopy(config)})
+			if isLeader {
+				alert_channel := make(chan raft.ApplyMsg, 1)
+				kv.addAlertChannel(index, alert_channel)
+				kv.mu.Unlock()
+
+				apply_msg := <-alert_channel
+
+				kv.mu.Lock()
+				kv.removeAlertChannel(index, alert_channel)
+
+				if apply_msg.CommandIndex != index {
+					panic("index mismatch")
+				}
+			}
+			
+		}
 		kv.mu.Unlock()
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -260,6 +497,12 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.map_vals = make(map[string]string)
 	kv.alert_channels = make(map[int][]chan raft.ApplyMsg)
 	kv.last_oper = make(map[int64]int64)
+
+	kv.shards_to_import = make(map[int]int)
+	kv.shards_to_export = make(map[int]int)
+	kv.old_config = shardctrler.Config{}
+	kv.new_config = shardctrler.Config{}
+	kv.serving_shards = make(map[int]struct{})
 
 	// You may need initialization code here.
 	// kv.persister = persister
