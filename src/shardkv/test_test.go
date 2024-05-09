@@ -31,24 +31,22 @@ func TestStaticShards5A(t *testing.T) {
 	defer cfg.cleanup()
 
 	ck := cfg.makeClient(cfg.ctl)
-	fmt.Printf("rqi test HERE 0")
+
 	cfg.join(0)
 	cfg.join(1)
-	fmt.Printf("rqi test HERE 0.5")
+
 	n := 10
 	ka := make([]string, n)
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
 		ka[i] = strconv.Itoa(i) // ensure multiple shards
 		va[i] = randstring(20)
-		fmt.Print("rqi CALLING PUT", i, ka[i], va[i], "\n")
 		ck.Put(ka[i], va[i])
 	}
-	fmt.Printf("rqi test HERE 0.7")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
-	fmt.Printf("rqi test HERE 1")
+
 	// make sure that the data really is sharded by
 	// shutting down one shard and checking that some
 	// Get()s don't succeed.
@@ -68,7 +66,6 @@ func TestStaticShards5A(t *testing.T) {
 		}(xi)
 	}
 
-	
 	// wait a bit, only about half the Gets should succeed.
 	ndone := 0
 	done := false
