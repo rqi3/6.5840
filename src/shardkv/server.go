@@ -1,6 +1,7 @@
 package shardkv
 
 import (
+	"bytes"
 	"sync"
 	"time"
 
@@ -66,6 +67,9 @@ type ShardKV struct {
 	new_config shardctrler.Config
 	shards_to_import map[int]int
 	shards_to_export map[int]int
+	all_shards_to_export map[int]int //all shards that needed to be exported in this movement phase
+
+	persister *raft.Persister
 }
 
 func (kv *ShardKV) removeAlertChannel(index int, alertChannelToRemove chan MyApplyMsg) {
@@ -352,7 +356,7 @@ func (kv *ShardKV) applier() {
 					}
 				}
 				
-				kv.lastApplied = msg.CommandIndex
+				
 				
 			} else if op.OpType == "Seal" {
 				// fmt.Printf("%d-%d: op.NewConfig: %+v\n", kv.gid, kv.me, op.NewConfig)
@@ -402,6 +406,10 @@ func (kv *ShardKV) applier() {
 						}
 					}
 
+					for shard_id, gid := range kv.shards_to_export {
+						kv.all_shards_to_export[shard_id] = gid
+					}
+
 					// fmt.Printf("%d-%d: kv.shards_to_export: %+v kv.shards_to_import: %+v\n", kv.gid, kv.me, kv.shards_to_export, kv.shards_to_import)
 
 					// start goroutines to export shards
@@ -428,13 +436,14 @@ func (kv *ShardKV) applier() {
 				}
 				
 			}
+			kv.lastApplied = msg.CommandIndex
+			// fmt.Printf("%d-%d: kv.lastApplied: %d\n", kv.gid, kv.me, kv.lastApplied)
 		} else {
-			// if !msg.SnapshotValid {
-			// 	panic("SnapshotValid should be true")
-			// }
-			// snapshot := msg.Snapshot
-			// kv.restoreSnapshot(snapshot)
-			// kv.persist()
+			if !msg.SnapshotValid {
+				panic("SnapshotValid should be true")
+			}
+			snapshot := msg.Snapshot
+			kv.restoreSnapshot(snapshot)
 		}
 
 		// alert RPCs
@@ -477,6 +486,84 @@ func (kv *ShardKV) updateConfig(){
 		}
 		kv.mu.Unlock()
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (kv *ShardKV) restoreSnapshot(kvstate []byte) {
+	if kvstate == nil || len(kvstate) < 1 { // bootstrap without any state?
+		return
+	}
+	
+	r := bytes.NewBuffer(kvstate)
+	d := labgob.NewDecoder(r)
+	var shard_infos [shardctrler.NShards]ShardInfo
+	var serving_shards map[int]struct{}
+	var old_config shardctrler.Config
+	var new_config shardctrler.Config
+	var shards_to_import map[int]int
+	var shards_to_export map[int]int
+	var all_shards_to_export map[int]int
+	var lastApplied int
+	if d.Decode(&shard_infos) != nil ||
+		d.Decode(&serving_shards) != nil ||
+		d.Decode(&old_config) != nil ||
+		d.Decode(&new_config) != nil ||
+		d.Decode(&shards_to_import) != nil ||
+		d.Decode(&shards_to_export) != nil ||
+		d.Decode(&all_shards_to_export) != nil ||
+		d.Decode(&lastApplied) != nil {
+		panic("readPersist decode error")
+	} else {
+		kv.shard_infos = shard_infos
+		kv.serving_shards = serving_shards
+		kv.old_config = old_config
+		kv.new_config = new_config
+		kv.shards_to_import = shards_to_import
+		kv.shards_to_export = shards_to_export
+		kv.all_shards_to_export = all_shards_to_export
+		for shard_id, gid := range shards_to_export {
+			kv.shards_to_export[shard_id] = gid
+		}
+		kv.lastApplied = lastApplied
+	}
+
+	// fmt.Printf("%d-%d: restoreSnapshot %v\n", kv.gid, kv.me, kv.new_config)
+	// fmt.Printf("%d-%d: kv.lastApplied: %d\n", kv.gid, kv.me, kv.lastApplied)
+
+
+	// if d.Decode(&map_vals) != nil ||
+	// 	d.Decode(&last_oper) != nil ||
+	// 	d.Decode(&lastApplied) != nil {
+	// 	panic("readPersist decode error")
+	// } else {
+	// 	kv.map_vals = map_vals
+	// 	kv.last_oper = last_oper
+	// 	kv.lastApplied = lastApplied
+	// }
+}
+
+func (kv *ShardKV) snapshotLoop() {
+	for{
+		kv.mu.Lock()
+		if kv.maxraftstate != -1 && float32(kv.persister.RaftStateSize()) > float32(kv.maxraftstate) * 0.75 {
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			e.Encode(kv.shard_infos)
+			e.Encode(kv.serving_shards)
+			e.Encode(kv.old_config)
+			e.Encode(kv.new_config)
+			e.Encode(kv.shards_to_import)
+			e.Encode(kv.shards_to_export)
+			e.Encode(kv.all_shards_to_export)
+			e.Encode(kv.lastApplied)
+			kvstate := w.Bytes()
+			lastApplied := kv.lastApplied
+			// kv.mu.Unlock()
+			kv.rf.Snapshot(lastApplied, kvstate) //rqi: maybe suspicious we're unlocking here and not before rf.Start
+			// kv.mu.Lock()
+		}
+		kv.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -540,13 +627,14 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.old_config = shardctrler.Config{}
 	kv.new_config = shardctrler.Config{}
 	kv.serving_shards = make(map[int]struct{})
+	kv.all_shards_to_export = make(map[int]int)
 
 	// You may need initialization code here.
-	// kv.persister = persister
-	// kv.restoreSnapshot(kv.persister.ReadSnapshot())
+	kv.persister = persister
+	kv.restoreSnapshot(kv.persister.ReadSnapshot())
 
 	go kv.applier()
-	// go kv.snapshotLoop()
+	go kv.snapshotLoop()
 	go kv.updateConfig()
 
 	return kv
