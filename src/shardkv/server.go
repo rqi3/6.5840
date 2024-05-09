@@ -82,7 +82,8 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	if _, ok := kv.serving_shards[key2shard(args.Key)]; ok {
+	if _, ok := kv.serving_shards[key2shard(args.Key)]; !ok {
+		// fmt.Printf("%d-%d: Not serving %v\n", kv.gid, kv.me, kv.serving_shards)
 		reply.Err = "ErrWrongGroup"
 		return
 	}
@@ -201,6 +202,7 @@ func configCopy(config shardctrler.Config) shardctrler.Config {
 func (kv *ShardKV) ExportShardRPC(args *ExportShardArgs, reply *ExportShardReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	// fmt.Printf("%d-%d: ExportShardRPC\n", kv.gid, kv.me)
 
 	if args.NewConfigNum < kv.new_config.Num {
 		reply.Err = "Success" //already applied this shard import!
@@ -217,6 +219,7 @@ func (kv *ShardKV) ExportShardRPC(args *ExportShardArgs, reply *ExportShardReply
 		reply.Err = "Success" //already imported this shard
 		return
 	}
+
 
 	operation_id := nrand()
 	shard_data := copyShardData(args.ShardData)
@@ -243,12 +246,11 @@ func (kv *ShardKV) ExportShardRPC(args *ExportShardArgs, reply *ExportShardReply
 		reply.Err = "DifferentThingCommitted"
 		return
 	}
-
 	reply.Err = "Success"
 }
 
 func (kv *ShardKV) exportShard(new_config_num int, shard_id int) {
-	fmt.Printf("exporting shard %d\n", shard_id)
+	// fmt.Printf("%d-%d: exporting shard %d\n", kv.gid, kv.me, shard_id)
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	shard_data := make(map[string]string)
@@ -258,58 +260,29 @@ func (kv *ShardKV) exportShard(new_config_num int, shard_id int) {
 		}
 	}
 
-	done := false
-	for{
-		if kv.new_config.Num != new_config_num {
-			panic("config number weird")
-		}
-		if servers, ok := kv.new_config.Groups[kv.shards_to_export[shard_id]]; ok {
-			// try each server for the shard.
-			return_channel := make(chan bool, len(servers))
-			timeout := make(chan bool, 1)
-			args := []ExportShardArgs{}
-			for si := 0; si < len(servers); si++ {
-				args = append(args, ExportShardArgs{ShardId: shard_id, NewConfigNum: new_config_num, ShardData: copyShardData(shard_data)})
-			}
-			srvs := []*labrpc.ClientEnd{}
-			for si := 0; si < len(servers); si++ {
-				srvs = append(srvs, kv.make_end(servers[si]))
-			}
-			for si := 0; si < len(servers); si++ {
-				srv := srvs[si]
-				go func(args ExportShardArgs){
+	if servers, ok := kv.new_config.Groups[kv.shards_to_export[shard_id]]; ok {
+		success_channel := make(chan bool, len(servers))
+		for si := 0; si < len(servers); si++ {
+			srv := kv.make_end(servers[si])
+			args := ExportShardArgs{ShardId: shard_id, NewConfigNum: new_config_num, ShardData: shard_data}
+			go func() {
+				for{
 					reply := ExportShardReply{}
 					ok := srv.Call("ShardKV.ExportShardRPC", &args, &reply)
-
 					if ok && reply.Err == "Success" {
-						return_channel <- true
+						success_channel <- true
+						return
 					}
-				}(args[si])
-			}
-			go func(){
-				time.Sleep(150 * time.Millisecond)
-				timeout <- true
+				}
 			}()
-
-			kv.mu.Unlock()
-			select {
-				case <- return_channel:
-					// a read from ch has occurred
-					done = true
-				case <- timeout:
-					// nothing
-			}
-			kv.mu.Lock()
-			if done {
-				break
-			}
-		} else {
-			//print kv.shards_to_export[shard_id]
-			// fmt.Printf("Group does not exist for shard %d %d\n", shard_id, kv.shards_to_export[shard_id])
-			panic("Weid, group does not exist?")
 		}
+		kv.mu.Unlock()
+		<- success_channel
+		kv.mu.Lock()
+		delete(kv.shards_to_export, shard_id)
+	} else {
+		panic("Weid, group does not exist?")
 	}
-
 }
 
 func (kv *ShardKV) applier() {
@@ -318,7 +291,7 @@ func (kv *ShardKV) applier() {
 		kv.mu.Lock()
 		if msg.CommandValid {
 			op := msg.Command.(Op)
-			fmt.Printf("%d: Apply %s %s %s\n", kv.me, op.OpType, op.Key, op.Value)
+			// fmt.Printf("%d-%d: Apply %s %s %s\n", kv.gid, kv.me, op.OpType, op.Key, op.Value)
 			if op.OpType == "Get" || op.OpType == "Put" || op.OpType == "Append" {
 				if op.OpType == "Get" {
 					//do nothing
@@ -337,10 +310,12 @@ func (kv *ShardKV) applier() {
 				kv.lastApplied = msg.CommandIndex
 				
 			} else if op.OpType == "Seal" {
-				if op.NewConfig.Num == kv.new_config.Num {
+				// fmt.Printf("%d-%d: op.NewConfig: %+v\n", kv.gid, kv.me, op.NewConfig)
+				if op.NewConfig.Num <= kv.new_config.Num {
 					//already processed
 				} else {
 					if op.NewConfig.Num != kv.new_config.Num+1 {
+						// fmt.Printf("%d %d: op.NewConfig.Num = %d, kv.new_config.Num = %d\n", kv.gid, kv.me, op.NewConfig.Num, kv.new_config.Num)
 						panic("op.NewConfig.Num != kv.new_config.Num+1")
 					}
 					// wait for shard imports and exports to finish
@@ -349,14 +324,15 @@ func (kv *ShardKV) applier() {
 						time.Sleep(10 * time.Millisecond)
 						waiting += 1
 						if waiting > 1000 {
+							fmt.Printf("%d-%d: waiting > 1000, shards_to_export = %v, shards_to_import = %v\n", kv.gid, kv.me, kv.shards_to_export, kv.shards_to_import)
 							panic("waiting > 1000") // maybe can remove this, but helpful for debug
 						}
 					}
 
-					kv.old_config = kv.new_config
+					kv.old_config = configCopy(kv.new_config)
 					kv.new_config = configCopy(op.NewConfig)
-					fmt.Printf("%d: kv.old_config: %+v\n", kv.me, kv.old_config)
-					fmt.Printf("%d: kv.new_config: %+v\n", kv.me, kv.new_config)
+					// fmt.Printf("%d %d: kv.old_config: %+v\n", kv.gid, kv.me, kv.old_config)
+					// fmt.Printf("%d %d: kv.new_config: %+v\n", kv.gid, kv.me, kv.new_config)
 
 					//figure out which shards to import, export
 					for i := 0; i < shardctrler.NShards; i++ {
@@ -373,7 +349,7 @@ func (kv *ShardKV) applier() {
 							
 						} else if new_gid != kv.gid && old_gid == kv.gid {
 							//export shard
-							fmt.Printf("Exporting shard %d\n", i)
+							// fmt.Printf("Exporting shard %d\n", i)
 							kv.shards_to_export[i] = new_gid
 							delete(kv.serving_shards, i)
 						}
@@ -423,11 +399,14 @@ func (kv *ShardKV) applier() {
 func (kv *ShardKV) updateConfig(){
 	for{
 		kv.mu.Lock()
+		// fmt.Printf("%d-%d: querying %d\n", kv.gid, kv.me, kv.new_config.Num+1)
+		// fmt.Printf("%d-%d: new_config: %v\n", kv.gid, kv.me, kv.new_config)
 		config := kv.mck.Query(kv.new_config.Num+1) //is this safe? query could take a long time. But otherwise data race on kv.mck?
 
 		if config.Num == kv.new_config.Num+1 {
 			operation_id := nrand()
 			index, _, isLeader := kv.rf.Start(Op{OpType: "Seal", OperationId: operation_id, NewConfig: configCopy(config)})
+			// fmt.Printf("%d-%d: updateConfig, config: %v\n", kv.gid, kv.me, config)
 			if isLeader {
 				alert_channel := make(chan raft.ApplyMsg, 1)
 				kv.addAlertChannel(index, alert_channel)

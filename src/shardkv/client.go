@@ -10,7 +10,6 @@ package shardkv
 
 import (
 	"crypto/rand"
-	"fmt"
 	"math/big"
 	"time"
 
@@ -76,7 +75,7 @@ func (ck *Clerk) Get(key string) string {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 
-				fmt.Printf("Get %s %s\n", key, servers[si])
+				// fmt.Printf("Get %s %s\n", key, servers[si])
 
 				return_channel := make(chan GetReply, 1)
 				timeout := make(chan bool, 1)
@@ -117,8 +116,8 @@ func (ck *Clerk) Get(key string) string {
 		time.Sleep(100 * time.Millisecond)
 		// ask controller for the latest configuration.
 		ck.config = ck.sm.Query(-1)
-		fmt.Printf("Query %v\n", ck.config)
-		fmt.Printf("Key Shard %v\n", key2shard(key))
+		// fmt.Printf("Query %v\n", ck.config)
+		// fmt.Printf("Key Shard %v\n", key2shard(key))
 	}
 
 	return ""
@@ -134,7 +133,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
-				fmt.Printf("PutAppend %s, %s, %s\n", key, value, op)
+				// fmt.Printf("PutAppend %s, %s, %s\n", key, value, op)
 				srv := ck.make_end(servers[si])
 
 				return_channel := make(chan PutAppendReply, 1)
