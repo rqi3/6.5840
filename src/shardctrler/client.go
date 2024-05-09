@@ -37,41 +37,21 @@ func (ck *Clerk) Query(num int) Config {
 	operation_id := nrand()
 	possible_leader := 0
 	for {
-		return_channel := make(chan QueryReply, 1)
-		timeout := make(chan bool, 1)
-		go func(leader int) {
-			args := QueryArgs{
-				Num: num,
-				ClientId: ck.client_id,
-				OperationId: operation_id,
-			}
-			reply_copy := QueryReply{}
-			ok := ck.servers[leader].Call("ShardCtrler.Query", &args, &reply_copy)
-			if ok {
-				return_channel <- reply_copy
-			} else {
-				return_channel <- QueryReply{Err: "BadCall"}
-			}
-		}(possible_leader)
-		go func(){
-			time.Sleep(150 * time.Millisecond)
-			timeout <- true
-		}()
-
-		reply := QueryReply{Err: "Null"}
-		select {
-			case a := <- return_channel:
-				// a read from ch has occurred
-				reply = a
-			case <-timeout:
-				reply = QueryReply{Err: "Timeout"}
+		// fmt.Printf("Shardcontroller client getting possible leader: %d\n", possible_leader)
+		args := QueryArgs{
+			Num: num,
+			ClientId: ck.client_id,
+			OperationId: operation_id,
 		}
+		reply := QueryReply{}
+		ok := ck.servers[possible_leader].Call("ShardCtrler.Query", &args, &reply)
 
-		if reply.Err != "" {
+		if !ok || reply.Err != "" {
+			// fmt.Printf("Shardctrler Client Err: %s\n", reply.Err)
 			possible_leader = (possible_leader + 1) % len(ck.servers)
 			continue
 		}
-		// fmt.Printf("Success %s %s %s\n", key, value, op)
+		// fmt.Printf("Shardctrler Success\n")
 		return reply.Config//success!
 	}
 }

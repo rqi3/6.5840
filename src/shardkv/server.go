@@ -2,7 +2,6 @@ package shardkv
 
 import (
 	"bytes"
-	"fmt"
 	"sync"
 	"time"
 
@@ -297,7 +296,7 @@ func (kv *ShardKV) ExportShardRPC(args *ExportShardArgs, reply *ExportShardReply
 
 func (kv *ShardKV) exportShard(new_config_num int, shard_id int) {
 	kv.mu.Lock()
-	fmt.Printf("%d-%d: exporting shard %d\n", kv.gid, kv.me, shard_id)
+	// fmt.Printf("%d-%d: exporting shard %d\n", kv.gid, kv.me, shard_id)
 	defer kv.mu.Unlock()
 	shard_data := copyShardData(kv.shard_infos[shard_id])
 
@@ -323,7 +322,12 @@ func (kv *ShardKV) exportShard(new_config_num int, shard_id int) {
 		delete(kv.shards_to_export, shard_id)
 		// fmt.Printf("%d-%d: exported shard %d %v\n", kv.gid, kv.me, shard_id, kv.shards_to_export)
 	} else {
-		panic("Weid, group does not exist?")
+		if new_config_num != kv.new_config.Num {
+			//config num has been changed in the meantime
+		} else {
+			panic("Weid, group does not exist?")
+		}
+		
 	}
 }
 
@@ -334,7 +338,7 @@ func (kv *ShardKV) applier() {
 		err := ""
 		if msg.CommandValid {
 			op := msg.Command.(Op)
-			fmt.Printf("%d-%d: Apply %s %s %s\n", kv.gid, kv.me, op.OpType, op.Key, op.Value)
+			// fmt.Printf("%d-%d: Apply %s %s %s\n", kv.gid, kv.me, op.OpType, op.Key, op.Value)
 			
 			if op.OpType == "Get" || op.OpType == "Put" || op.OpType == "Append" {
 				_, ok := kv.serving_shards[key2shard(op.Key)]
@@ -360,7 +364,7 @@ func (kv *ShardKV) applier() {
 				
 				
 			} else if op.OpType == "Seal" {
-				fmt.Printf("%d-%d: op.NewConfig: %+v\n", kv.gid, kv.me, op.NewConfig)
+				// fmt.Printf("%d-%d: op.NewConfig: %+v\n", kv.gid, kv.me, op.NewConfig)
 				if op.NewConfig.Num <= kv.new_config.Num {
 					//already processed
 				} else {
@@ -529,23 +533,14 @@ func (kv *ShardKV) restoreSnapshot(kvstate []byte) {
 		kv.lastApplied = lastApplied
 	}
 
-	fmt.Printf("%d-%d: restoreSnapshot %v\n", kv.gid, kv.me, kv.new_config)
-	fmt.Printf("%d-%d: kv.lastApplied: %d\n", kv.gid, kv.me, kv.lastApplied)
-	fmt.Printf("%d-%d: kv.shards_to_export: %v\n", kv.gid, kv.me, kv.shards_to_export)
+	// fmt.Printf("%d-%d: restoreSnapshot %v\n", kv.gid, kv.me, kv.new_config)
+	// fmt.Printf("%d-%d: kv.lastApplied: %d\n", kv.gid, kv.me, kv.lastApplied)
+	// fmt.Printf("%d-%d: kv.shards_to_export: %v\n", kv.gid, kv.me, kv.shards_to_export)
 
 	for shard_id := range kv.shards_to_export {
-		fmt.Printf("%d-%d: starting restoreSnapshot exportShard %d\n", kv.gid, kv.me, shard_id)
+		// fmt.Printf("%d-%d: starting restoreSnapshot exportShard %d\n", kv.gid, kv.me, shard_id)
 		go kv.exportShard(kv.new_config.Num, shard_id)
 	}
-	// if d.Decode(&map_vals) != nil ||
-	// 	d.Decode(&last_oper) != nil ||
-	// 	d.Decode(&lastApplied) != nil {
-	// 	panic("readPersist decode error")
-	// } else {
-	// 	kv.map_vals = map_vals
-	// 	kv.last_oper = last_oper
-	// 	kv.lastApplied = lastApplied
-	// }
 }
 
 func (kv *ShardKV) snapshotLoop() {
@@ -645,9 +640,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	go kv.applier()
 	// fmt.Printf("%d-%d: after restoreSnapshot 2\n", kv.gid, kv.me)
-	if kv.maxraftstate != -1 && kv.maxraftstate == 1000{
-		go kv.snapshotLoop()
-	}
+	// if kv.maxraftstate != -1 && kv.maxraftstate == 1000{
+	go kv.snapshotLoop()
+	// }
 	// fmt.Printf("%d-%d: after restoreSnapshot 3\n", kv.gid, kv.me)
 	// fmt.Printf("%d-%d: starting restoreSnapshot exportShard LOOP\n", kv.gid, kv.me)
 	

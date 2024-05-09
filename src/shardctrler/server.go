@@ -3,6 +3,7 @@ package shardctrler
 import (
 	"strconv"
 	"sync"
+	"time"
 
 	"6.5840/labgob"
 	"6.5840/labrpc"
@@ -177,9 +178,12 @@ func rebalanceShards(config Config) [NShards]int {
 }
 
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
+	// fmt.Printf("ShardCtrler Join\n")
 	// Your code here.
 	sc.mu.Lock()
+	// fmt.Printf("ShardCtrler Join LOCK\n")
 	defer sc.mu.Unlock()
+	// defer fmt.Printf("ShardCtrler Join Unlock\n")
 
 	if sc.last_oper[args.ClientId] == args.OperationId {
 		return
@@ -194,6 +198,8 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	
 	if !isLeader{
 		reply.Err = "NotLeader"
+		// fmt.Printf("ShardCtrler JOIN Not leader...\n")
+		return
 	}
 
 	alert_channel := make(chan ShardCtrlerApplyMsg, 1)
@@ -228,8 +234,11 @@ func contains(s []int, x int) bool {
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
+	// fmt.Printf("ShardCtrler Leave before lock\n")
 	sc.mu.Lock()
+	// fmt.Printf("ShardCtrler Leave After lock\n")
 	defer sc.mu.Unlock()
+	// defer fmt.Printf("ShardCtrler Leave Unlock\n")
 
 	if sc.last_oper[args.ClientId] == args.OperationId {
 		return
@@ -244,6 +253,8 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	
 	if !isLeader{
 		reply.Err = "NotLeader"
+		// fmt.Printf("Leave Not leader...")
+		return
 	}
 
 	alert_channel := make(chan ShardCtrlerApplyMsg, 1)
@@ -310,19 +321,43 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
+	// fmt.Printf("Shardctrler Query before lock..\n")
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	
+	// defer fmt.Printf("ShardCtrler Query Unlock\n")
+
+	// fmt.Printf("Shardctrler Query after lock...\n")
 	index, _, isLeader := sc.rf.Start(Op{
 		OpType: "Query",
 		Num: args.Num,
 		ClientId: args.ClientId, 
 		OperationId: args.OperationId,
 	})
+	// fmt.Printf("Shardctrler query started...\n")
 	
 	if !isLeader{
 		reply.Err = "NotLeader"
+		return
 	}
+	leader_change_channel := make(chan bool, 1)
+	was_alerted := false
+	go func() {
+		for{
+			sc.mu.Lock()
+			_, is_leader := sc.rf.GetState()
+			if !is_leader {
+				leader_change_channel <- true
+				sc.mu.Unlock()
+				return
+			}
+			if was_alerted {
+				sc.mu.Unlock()
+				return
+			}
+			sc.mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+		}
+	} ()
 
 	alert_channel := make(chan ShardCtrlerApplyMsg, 1)
 	existing_channel_list := make([]chan ShardCtrlerApplyMsg, 0)
@@ -331,8 +366,20 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	}
 	sc.alert_channels[index] = append(existing_channel_list, alert_channel)
 	sc.mu.Unlock()
-	apply_msg := <-alert_channel
+	var apply_msg ShardCtrlerApplyMsg
+	select {
+		case <-leader_change_channel:
+			reply.Err = "LeaderChanged"
+			break
+		case apply_msg = <-alert_channel:
+			break
+	}
+	
 	sc.mu.Lock()
+	if reply.Err == "LeaderChanged" {
+		return
+	}
+	was_alerted = true
 	sc.removeAlertChannel(index, alert_channel)
 
 	if apply_msg.raft_apply_msg.CommandIndex != index {
@@ -342,6 +389,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	if apply_msg.raft_apply_msg.Command.(Op).OperationId != args.OperationId {
 		reply.Err = "DifferentThingCommitted"
 	}
+	// fmt.Printf("Shardcontroller Query committed\n")
 	value := apply_msg.new_config
 	reply.Config = value
 
@@ -351,10 +399,11 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 func (sc *ShardCtrler) applier() {
 	for{
 		msg := <-sc.applyCh
+		// fmt.Printf("Applier lock...\n")
 		sc.mu.Lock()
 		if msg.CommandValid {
 			op := msg.Command.(Op)
-			// fmt.Printf("%d: Apply %v\n", sc.me, op)
+			// // fmt.Printf("%d: Apply %v\n", sc.me, op)
 			new_config := Config{}
 			if op.OpType == "Join" {
 				if sc.last_oper[op.ClientId] != op.OperationId {
@@ -422,12 +471,14 @@ func (sc *ShardCtrler) applier() {
 					}
 				}
 			}
-			// fmt.Printf("%d: NUM CONFIGS: %d\n", sc.me, len(sc.configs))
-			// fmt.Printf("%d: RESULTING CONFIG is %v\n", sc.me, sc.configs[len(sc.configs) - 1])
+			// // fmt.Printf("%d: NUM CONFIGS: %d\n", sc.me, len(sc.configs))
+			// // fmt.Printf("%d: RESULTING CONFIG is %v\n", sc.me, sc.configs[len(sc.configs) - 1])
 		} else {
 			panic("Unexpected msg.CommandValid: " + strconv.FormatBool(msg.CommandValid))
 		}
+		// fmt.Printf("Applier unlock...\n")
 		sc.mu.Unlock()
+		
 	}
 }
 

@@ -75,7 +75,7 @@ func (ck *Clerk) Get(key string) string {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 
-				// fmt.Printf("Get %s %s\n", key, servers[si])
+				// fmt.Printf("Client Get %s %s\n", key, servers[si])
 
 				return_channel := make(chan GetReply, 1)
 				timeout := make(chan bool, 1)
@@ -96,6 +96,7 @@ func (ck *Clerk) Get(key string) string {
 				}()
 
 				reply := GetReply{Err: "Null"}
+				// fmt.Printf("Client: waiting for reply")
 				select {
 					case a := <- return_channel:
 						// a read from ch has occurred
@@ -103,6 +104,7 @@ func (ck *Clerk) Get(key string) string {
 					case <-timeout:
 						reply = GetReply{Err: "Timeout"}
 				}
+				// fmt.Printf("Client: got reply!")
 
 				if reply.Err == "" { //removed reply.Err == "ErrNoKey"
 					return reply.Value
@@ -115,8 +117,9 @@ func (ck *Clerk) Get(key string) string {
 		}
 		time.Sleep(100 * time.Millisecond)
 		// ask controller for the latest configuration.
+		// fmt.Printf("Client: Asking for config %v\n", ck.config)
 		ck.config = ck.sm.Query(-1)
-		// fmt.Printf("Query %v\n", ck.config)
+		// fmt.Printf("Client: Query %v\n", ck.config)
 		// fmt.Printf("Key Shard %v\n", key2shard(key))
 	}
 
